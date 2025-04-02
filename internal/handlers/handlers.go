@@ -56,10 +56,10 @@ func New(cfg *config.Config) (*Handlers, error) {
 	}
 
 	imgLru := expirable.NewLRU[string, bool](0, func(filename string, hasTimeout bool) {
-		if hasTimeout {
+		if !hasTimeout {
 			return
 		}
-		err := images_manager.Remove(cfg.Cfg.ImagesDir, filename)
+		err := images_manager.Remove(cfg.Cfg.RecipeImageDir, filename)
 		if err != nil {
 			utils.LogError("Failed to remove recipe image", err)
 		}
@@ -75,7 +75,7 @@ func New(cfg *config.Config) (*Handlers, error) {
 	}, nil
 }
 
-func (h *Handlers) Init() {
+func (h *Handlers) RegisterEndpoints() {
 	h.e.Use(middleware.CORS())
 	h.e.Use(middleware.RecoverWithConfig(middleware.RecoverConfig{
 		LogErrorFunc: func(c echo.Context, err error, stack []byte) error {
@@ -134,8 +134,8 @@ func (h *Handlers) Init() {
 
 	// Recipes images
 	protectedRouter.POST("/recipe-pictures", h.SaveRecipeImage)
-	protectedRouter.DELETE("/recipe-picture/:id", h.DeleteRecipeImage)
-	unprotectedRouter.Static("/recipe-images", h.cfg.RecipeImageDir)
+	protectedRouter.DELETE("/recipe-pictures/:id", h.DeleteRecipeImage)
+	unprotectedRouter.Static("/recipe-pictures", h.cfg.RecipeImageDir)
 }
 
 func (h *Handlers) Run(port int) {

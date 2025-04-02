@@ -6,6 +6,12 @@ import (
 	"recipes/internal/handlers"
 )
 
+// @title           Recipes API Swagger
+// @version         1.0
+// @description     Swagger
+
+// @host      localhost:8080
+// @securityDefinitions.basic  BasicAuth
 func main() {
 	cfg, err := config.NewConfig("RECIPES")
 	if err != nil {
@@ -17,6 +23,6 @@ func main() {
 		log.Fatal(err)
 	}
 
-	hdl.Init()
+	hdl.RegisterEndpoints()
 	hdl.Run(cfg.Cfg.Port)
 }

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"github.com/labstack/echo/v4"
+	"golang.org/x/exp/slices"
 	"net/http"
 	"recipes/internal/images_manager"
 	"recipes/internal/jwt_manager"
@@ -20,8 +21,7 @@ func (h *Handlers) CreateRecipe(c echo.Context) error {
 		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
 	}
 	for _, k := range recipe.Pictures {
-		_ = images_manager.Remove(h.cfg.ImagesDir, k)
-		h.imgLru.Add(k, true)
+		h.imgLru.Add(k, false)
 		h.imgLru.Remove(k)
 	}
 	return c.JSON(http.StatusCreated, recipe)
@@ -51,12 +51,7 @@ func (h *Handlers) GetRecipes(c echo.Context) error {
 }
 
 func (h *Handlers) GetRecipe(c echo.Context) error {
-	recipeId := c.Param("id")
-	recipe, err := h.db.GetRecipeById(recipeId)
-	if err != nil {
-		return errorResponse(http.StatusNotFound, err.Error(), err, c)
-	}
-	return c.JSON(http.StatusOK, recipe)
+	return c.JSON(http.StatusOK, c.Get("recipe"))
 }
 
 func (h *Handlers) UpdateRecipe(c echo.Context) error {
@@ -67,11 +62,32 @@ func (h *Handlers) UpdateRecipe(c echo.Context) error {
 		return errorResponse(http.StatusBadRequest, err.Error(), err, c)
 	}
 
-	recipe, err := h.db.UpdateRecipeById(recipeId, &body)
+	if len(body.Pictures) > 0 {
+		recipe := c.Get("recipe").(models.Recipe)
+		addPictures := slices.Clone(body.Pictures)
+		slices.DeleteFunc(addPictures, func(s string) bool {
+			length := len(recipe.Pictures)
+			recipe.Pictures = slices.DeleteFunc(recipe.Pictures, func(s2 string) bool { return s2 == s })
+			return length != len(recipe.Pictures)
+		})
+
+		for _, deletePicture := range recipe.Pictures {
+			err := images_manager.Remove(h.cfg.RecipeImageDir, deletePicture)
+			if err != nil {
+				return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
+			}
+		}
+		for _, addPicture := range addPictures {
+			h.imgLru.Add(addPicture, false)
+			h.imgLru.Remove(addPicture)
+		}
+	}
+
+	updated, err := h.db.UpdateRecipeById(recipeId, &body)
 	if err != nil {
 		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
 	}
-	return c.JSON(http.StatusOK, recipe)
+	return c.JSON(http.StatusOK, updated)
 }
 
 func (h *Handlers) DeleteRecipe(c echo.Context) error {
@@ -81,10 +97,13 @@ func (h *Handlers) DeleteRecipe(c echo.Context) error {
 		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
 	}
 	for _, img := range recipe.Pictures {
-		err = images_manager.Remove(h.cfg.RecipeImageDir, img)
-		if err != nil {
-			return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
+		tmpErr := images_manager.Remove(h.cfg.RecipeImageDir, img)
+		if tmpErr != nil {
+			err = tmpErr
 		}
+	}
+	if err != nil {
+		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
 	}
 	return c.JSON(http.StatusOK, recipe)
 }
@@ -98,6 +117,7 @@ func (h *Handlers) RecipeAuthorMiddleware(next echo.HandlerFunc) echo.HandlerFun
 			return errorResponse(http.StatusNotFound, err.Error(), err, c)
 		}
 
+		c.Set("recipe", recipe)
 		if recipe.Author.Id.Hex() == jwt.UserId || jwt.Admin {
 			return next(c)
 		}

@@ -21,16 +21,12 @@ func (h *Handlers) SaveRecipeImage(c echo.Context) error {
 	}
 
 	fileName := primitive.NewObjectID().Hex() + filepath.Ext(formFile.Filename)
-	if err != nil {
-		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
-	}
-
 	err = images_manager.Save(formFile, h.cfg.RecipeImageDir, fileName)
 	if err != nil {
 		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
 	}
 
-	h.imgLru.Add(fileName, false)
+	h.imgLru.Add(fileName, true)
 	return c.JSON(http.StatusOK, models.UpdatePictureResponse{Picture: fileName})
 }
 

@@ -156,7 +156,7 @@ func (c *Client) GetRecipes(parameters models.GetRecipesRequest) ([]models.Recip
 		count++
 	}
 
-	if parameters.PreparationTime.Milliseconds() != 0 || parameters.TotalTime.Milliseconds() != 0 {
+	if (parameters.PreparationTime != nil && parameters.PreparationTime.Milliseconds() != 0) || (parameters.TotalTime != nil && parameters.TotalTime.Milliseconds() != 0) {
 		if parameters.PreparationTime.Milliseconds() != 0 {
 			pipeline = append(pipeline, bson.D{{"$addFields", bson.D{
 				{"diffPrepTime", bson.D{
