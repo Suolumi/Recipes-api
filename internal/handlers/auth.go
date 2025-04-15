@@ -58,7 +58,7 @@ func (h *Handlers) Login(c echo.Context) error {
 	})
 }
 
-// @Summary Create an account
+// @Summary Register
 // @Description Create an account with needed information
 // @Tags Auth
 // @accept json

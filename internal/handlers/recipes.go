@@ -9,6 +9,17 @@ import (
 	"recipes/internal/models"
 )
 
+// @Summary Create Recipe
+// @Description Create a recipe with required information
+// @Tags Recipes
+// @accept json
+// @produce json
+// @Param request body models.CreateRecipe true "Recipe information"
+// @Success 200 {object} models.Recipe "OK"
+// @Failure 400 {object} models.ErrorResponse "Bad Request"
+// @Failure 401 {object} models.ErrorResponse "Invalid or expired jwt"
+// @Failure 500 {object} models.ErrorResponse "Failed to create the recipe"
+// @Router /recipes [post]
 func (h *Handlers) CreateRecipe(c echo.Context) error {
 	var body models.CreateRecipe
 	jwt := jwt_manager.GetJwt[*models.AccessJwt](c)
@@ -27,6 +38,17 @@ func (h *Handlers) CreateRecipe(c echo.Context) error {
 	return c.JSON(http.StatusCreated, recipe)
 }
 
+// @Summary Get Recipes (preview)
+// @Description Get multiple recipe previews with query parameters
+// @Tags Recipes
+// @accept json
+// @produce json
+// @Param request query models.GetRecipesRequest false "Query params"
+// @Success 200 {object} models.GetRecipesResponse "OK"
+// @Failure 400 {object} models.ErrorResponse "Bad Request"
+// @Failure 401 {object} models.ErrorResponse "Invalid or expired jwt"
+// @Failure 500 {object} models.ErrorResponse "Failed to get the recipes"
+// @Router /recipes [get]
 func (h *Handlers) GetRecipes(c echo.Context) error {
 	var body models.GetRecipesRequest
 	err := c.Bind(&body)
@@ -50,6 +72,17 @@ func (h *Handlers) GetRecipes(c echo.Context) error {
 	})
 }
 
+// @Summary Get Recipe
+// @Description Get the full information of a recipe
+// @Tags Recipes
+// @accept json
+// @produce json
+// @Param request body models.CreateRecipe true "Recipe information"
+// @Success 200 {object} models.Recipe "OK"
+// @Failure 400 {object} models.ErrorResponse "Bad Request"
+// @Failure 401 {object} models.ErrorResponse "Invalid or expired jwt"
+// @Failure 500 {object} models.ErrorResponse "Failed to create the recipe"
+// @Router /recipes [post]
 func (h *Handlers) GetRecipe(c echo.Context) error {
 	return c.JSON(http.StatusOK, c.Get("recipe"))
 }
