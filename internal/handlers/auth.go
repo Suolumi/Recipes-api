@@ -8,6 +8,17 @@ import (
 	"time"
 )
 
+// @Summary Login
+// @Description Log in with email/username and password to get access and refresh tokens
+// @Tags Auth
+// @accept json
+// @produce json
+// @Param request body models.LoginRequest true "Login request"
+// @Success 200 {object} models.LoginResponse "OK"
+// @Failure 400 {object} models.ErrorResponse "Bad Request"
+// @Failure 404 {object} models.ErrorResponse "Incorrect username or password"
+// @Failure 500 {object} models.ErrorResponse "Failed to generate tokens"
+// @Router /login [post]
 func (h *Handlers) Login(c echo.Context) error {
 	var reqUser models.LoginRequest
 	err := c.Bind(&reqUser)
@@ -47,6 +58,18 @@ func (h *Handlers) Login(c echo.Context) error {
 	})
 }
 
+// @Summary Create an account
+// @Description Create an account with needed information
+// @Tags Auth
+// @accept json
+// @produce json
+// @Param request body models.RegisterRequest true "Register request"
+// @Success 201 {object} models.MessageResponse "User created"
+// @Failure 400 {object} models.ErrorResponse "Bad Request"
+// @Failure 406 {object} models.ErrorResponse "Password not strong enough / Invalid mail / Invalid username"
+// @Failure 409 {object} models.ErrorResponse "User already exists"
+// @Failure 500 {object} models.ErrorResponse "Failed to: generate username / check if username was banned / create user / create jwt / send mail"
+// @Router /register [post]
 func (h *Handlers) Register(c echo.Context) error {
 	var user models.RegisterRequest
 

@@ -23,6 +23,17 @@ func (h *Handlers) QueryJwt(next echo.HandlerFunc) echo.HandlerFunc {
 	}
 }
 
+// @Summary Get a new access token
+// @Description Get a new access token by providing a valid refresh token
+// @Tags Auth
+// @accept json
+// @produce json
+// @Param request body models.RefreshRequest true "Refresh request"
+// @Success 200 {object} models.RefreshResponse "OK"
+// @Failure 400 {object} models.ErrorResponse "Bad Request"
+// @Failure 401 {object} models.ErrorResponse "Invalid or expired jwt"
+// @Failure 500 {object} models.ErrorResponse "Failed to: get the corresponding user / generate a new token"
+// @Router /refresh [post]
 func (h *Handlers) Refresh(c echo.Context) error {
 	var body models.RefreshRequest
 	err := c.Bind(&body)
