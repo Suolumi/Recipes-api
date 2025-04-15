@@ -12,6 +12,16 @@ import (
 	"recipes/internal/utils"
 )
 
+// @Summary Get self
+// @Description Get self
+// @Tags Users
+// @accept json
+// @produce json
+// @Success 200 {object} models.UserMe "User"
+// @Failure 401 {object} models.ErrorResponse "Invalid or expired jwt"
+// @Failure 500 {object} models.ErrorResponse "Failed to get self"
+// @Security BearerAuth
+// @Router /users/me [get]
 func (h *Handlers) GetMe(c echo.Context) error {
 	jwt := jwt_manager.GetJwt[*models.AccessJwt](c)
 
@@ -23,6 +33,20 @@ func (h *Handlers) GetMe(c echo.Context) error {
 	return c.JSON(http.StatusOK, utils.DupStruct[models.UserMe](&user))
 }
 
+// @Summary Update self
+// @Description Update self
+// @Tags Users
+// @accept json
+// @produce json
+// @Param request body models.UpdateUser true "User information to update"
+// @Success 200 {object} models.UserMe "User"
+// @Failure 400 {object} models.ErrorResponse "Bad request"
+// @Failure 401 {object} models.ErrorResponse "Invalid or expired jwt"
+// @Failure 406 {object} models.ErrorResponse "Username too long / invalid email / insecure password"
+// @Failure 409 {object} models.ErrorResponse "User already exists"
+// @Failure 500 {object} models.ErrorResponse "Failed to update self"
+// @Security BearerAuth
+// @Router /users/me [patch]
 func (h *Handlers) UpdateMe(c echo.Context) error {
 	jwt := jwt_manager.GetJwt[*models.AccessJwt](c)
 
@@ -60,6 +84,17 @@ func (h *Handlers) UpdateMe(c echo.Context) error {
 	return c.JSON(http.StatusOK, utils.DupStruct[models.UserMe](&updatedUser))
 }
 
+// @Summary Delete self
+// @Description Delete self
+// @Tags Users
+// @accept json
+// @produce json
+// @Param request body models.UpdateUser true "User information to update"
+// @Success 200 {object} models.UserMe "User"
+// @Failure 401 {object} models.ErrorResponse "Invalid or expired jwt"
+// @Failure 500 {object} models.ErrorResponse "Failed to delete self / delete picture"
+// @Security BearerAuth
+// @Router /users/me [delete]
 func (h *Handlers) DeleteMe(c echo.Context) error {
 	jwt := jwt_manager.GetJwt[*models.AccessJwt](c)
 
@@ -75,6 +110,19 @@ func (h *Handlers) DeleteMe(c echo.Context) error {
 	return c.JSON(http.StatusOK, utils.DupStruct[models.UserMe](&user))
 }
 
+// @Summary Update self picture
+// @Description Update your profile picture, must be under 8MB
+// @Tags Users
+// @accept mpfd
+// @produce json
+// @Param request formData file true "Picture, formData must be named 'file'"
+// @Success 200 {object} models.UpdatePictureResponse "OK"
+// @Failure 400 {object} models.ErrorResponse "Empty formData / not named correctly"
+// @Failure 401 {object} models.ErrorResponse "Invalid or expired token"
+// @Failure 406 {object} models.ErrorResponse "Wrong format (not png / jpeg / jpg) / File too heavy"
+// @Failure 500 {object} models.ErrorResponse "Failed to: Update user, save the image"
+// @Security BearerAuth
+// @Router /users/me/picture [post]
 func (h *Handlers) UploadProfilePicture(c echo.Context) error {
 	jwt := jwt_manager.GetJwt[*models.AccessJwt](c)
 
@@ -111,9 +159,20 @@ func (h *Handlers) UploadProfilePicture(c echo.Context) error {
 	if err != nil {
 		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
 	}
-	return c.JSON(http.StatusOK, models.UpdatePictureResponse{Picture: fileName})
+	return c.JSON(http.StatusOK, models.UpdatePictureResponse{Id: fileName})
 }
 
+// @Summary Delete own picture
+// @Description Delete your profile picture
+// @Tags Users
+// @produce json
+// @Success 200 {object} models.MessageResponse "Picture deleted"
+// @Failure 401 {object} models.ErrorResponse "Invalid or expired token"
+// @Failure 404 {object} models.ErrorResponse "Image not found"
+// @Failure 422 {object} models.ErrorResponse "No picture for this user"
+// @Failure 500 {object} models.ErrorResponse "Failed to: Update user / remove the picture"
+// @Security BearerAuth
+// @Router /users/me/picture [delete]
 func (h *Handlers) DeleteProfilePicture(c echo.Context) error {
 	jwt := jwt_manager.GetJwt[*models.AccessJwt](c)
 	user, err := h.db.GetUserById(jwt.UserId)

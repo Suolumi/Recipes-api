@@ -19,6 +19,7 @@ import (
 // @Failure 400 {object} models.ErrorResponse "Bad Request"
 // @Failure 401 {object} models.ErrorResponse "Invalid or expired jwt"
 // @Failure 500 {object} models.ErrorResponse "Failed to create the recipe"
+// @Security BearerAuth
 // @Router /recipes [post]
 func (h *Handlers) CreateRecipe(c echo.Context) error {
 	var body models.CreateRecipe
@@ -48,6 +49,7 @@ func (h *Handlers) CreateRecipe(c echo.Context) error {
 // @Failure 400 {object} models.ErrorResponse "Bad Request"
 // @Failure 401 {object} models.ErrorResponse "Invalid or expired jwt"
 // @Failure 500 {object} models.ErrorResponse "Failed to get the recipes"
+// @Security BearerAuth
 // @Router /recipes [get]
 func (h *Handlers) GetRecipes(c echo.Context) error {
 	var body models.GetRecipesRequest
@@ -77,16 +79,31 @@ func (h *Handlers) GetRecipes(c echo.Context) error {
 // @Tags Recipes
 // @accept json
 // @produce json
-// @Param request body models.CreateRecipe true "Recipe information"
 // @Success 200 {object} models.Recipe "OK"
 // @Failure 400 {object} models.ErrorResponse "Bad Request"
 // @Failure 401 {object} models.ErrorResponse "Invalid or expired jwt"
-// @Failure 500 {object} models.ErrorResponse "Failed to create the recipe"
-// @Router /recipes [post]
+// @Failure 403 {object} models.ErrorResponse "Unauthorized"
+// @Failure 404 {object} models.ErrorResponse "Recipe not found"
+// @Security BearerAuth
+// @Router /recipes/:id [get]
 func (h *Handlers) GetRecipe(c echo.Context) error {
 	return c.JSON(http.StatusOK, c.Get("recipe"))
 }
 
+// @Summary Update Recipe
+// @Description Update a recipe with information
+// @Tags Recipes
+// @accept json
+// @produce json
+// @Param request body models.UpdateRecipeRequest true "Recipe information"
+// @Success 200 {object} models.Recipe "OK"
+// @Failure 400 {object} models.ErrorResponse "Bad Request"
+// @Failure 401 {object} models.ErrorResponse "Invalid or expired jwt"
+// @Failure 403 {object} models.ErrorResponse "Unauthorized"
+// @Failure 404 {object} models.ErrorResponse "Recipe not found"
+// @Failure 500 {object} models.ErrorResponse "Failed to update the recipe"
+// @Security BearerAuth
+// @Router /recipes/:id [patch]
 func (h *Handlers) UpdateRecipe(c echo.Context) error {
 	recipeId := c.Param("id")
 	var body models.UpdateRecipeRequest
@@ -123,6 +140,18 @@ func (h *Handlers) UpdateRecipe(c echo.Context) error {
 	return c.JSON(http.StatusOK, updated)
 }
 
+// @Summary Delete Recipe
+// @Description Delete a recipe
+// @Tags Recipes
+// @accept json
+// @produce json
+// @Success 200 {object} models.Recipe "OK"
+// @Failure 401 {object} models.ErrorResponse "Invalid or expired jwt"
+// @Failure 403 {object} models.ErrorResponse "Unauthorized"
+// @Failure 404 {object} models.ErrorResponse "Recipe not found"
+// @Failure 500 {object} models.ErrorResponse "Failed to delete the recipe"
+// @Security BearerAuth
+// @Router /recipes/:id [delete]
 func (h *Handlers) DeleteRecipe(c echo.Context) error {
 	recipeId := c.Param("id")
 	recipe, err := h.db.DeleteRecipeById(recipeId)

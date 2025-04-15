@@ -10,6 +10,18 @@ import (
 	"recipes/internal/models"
 )
 
+// @Summary Update Recipe image
+// @Description Update a recipe image
+// @Tags Recipes
+// @accept json
+// @produce json
+// @Param id path string true "id of the picture"
+// @Success 200 {object} models.UpdatePictureResponse "Image saved"
+// @Failure 401 {object} models.ErrorResponse "Invalid or expired jwt"
+// @Failure 406 {object} models.ErrorResponse "Wrong format / Image > 8 MB"
+// @Failure 500 {object} models.ErrorResponse "Failed to delete the recipe"
+// @Security BearerAuth
+// @Router /recipe-pictures [post]
 func (h *Handlers) SaveRecipeImage(c echo.Context) error {
 	formFile, err := c.FormFile("file")
 	if err != nil {
@@ -27,9 +39,21 @@ func (h *Handlers) SaveRecipeImage(c echo.Context) error {
 	}
 
 	h.imgLru.Add(fileName, true)
-	return c.JSON(http.StatusOK, models.UpdatePictureResponse{Picture: fileName})
+	return c.JSON(http.StatusOK, models.UpdatePictureResponse{Id: fileName})
 }
 
+// @Summary Delete Recipe image
+// @Description Delete a recipe image
+// @Tags Recipes
+// @accept json
+// @produce json
+// @Param id path string true "id of the picture"
+// @Success 200 {object} models.MessageResponse "Image removed successfully"
+// @Failure 401 {object} models.ErrorResponse "Invalid or expired jwt"
+// @Failure 404 {object} models.ErrorResponse "Image not found"
+// @Failure 500 {object} models.ErrorResponse "Failed to delete the recipe"
+// @Security BearerAuth
+// @Router /recipe-pictures/:id [delete]
 func (h *Handlers) DeleteRecipeImage(c echo.Context) error {
 	userId := c.Param("id")
 	user, err := h.db.GetUserById(userId)
@@ -49,3 +73,14 @@ func (h *Handlers) DeleteRecipeImage(c echo.Context) error {
 	}
 	return messageResponse(http.StatusOK, "Image removed successfully", c)
 }
+
+// @Summary Get recipe image
+// @Description Get a recipe image
+// @Tags Recipes
+// @produce jpeg
+// @produce png
+// @Param id path string true "id of the image picture, along with the image extension" example(6567bd0a84f663dbe91176f5.png)
+// @Success 200 "Jpeg, png or jpg image"
+// @Failure 404 "Not found"
+// @Router /recipe-pictures [get]
+func _() {}

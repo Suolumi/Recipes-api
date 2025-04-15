@@ -12,7 +12,7 @@ type UpdateUser struct {
 }
 
 type UpdatePictureResponse struct {
-	Picture string `json:"picture"`
+	Id string `json:"id"`
 }
 
 type GetUsersRequest struct {

@@ -11,7 +11,9 @@ import (
 // @description     Swagger
 
 // @host      localhost:8080
-// @securityDefinitions.basic  BasicAuth
+// @securityDefinitions.apikey BearerAuth
+// @in header
+// @name Authorization
 func main() {
 	cfg, err := config.NewConfig("RECIPES")
 	if err != nil {

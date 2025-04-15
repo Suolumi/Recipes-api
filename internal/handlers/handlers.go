@@ -129,7 +129,7 @@ func (h *Handlers) RegisterEndpoints() {
 	unprotectedRouter.GET("/recipes", h.GetRecipes)
 	protectedRouter.POST("/recipes", h.CreateRecipe)
 	unprotectedRouter.GET("/recipes/:id", h.GetRecipe)
-	protectedRouter.PUT("/recipes/:id", h.UpdateRecipe, h.RecipeAuthorMiddleware)
+	protectedRouter.PATCH("/recipes/:id", h.UpdateRecipe, h.RecipeAuthorMiddleware)
 	protectedRouter.DELETE("/recipes/:id", h.DeleteRecipe, h.RecipeAuthorMiddleware)
 
 	// Recipes images
@@ -143,7 +143,3 @@ func (h *Handlers) Run(port int) {
 }
 
 // TODO: Limiter le nombre de caractères par titre de recette
-/*
-	Images:
-	Upload une image et return le path dans
-*/
