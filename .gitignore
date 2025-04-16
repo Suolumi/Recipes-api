@@ -1,2 +1,5 @@
-assets
+api/assets
 .env
+.idea
+.vscode
+.envrc

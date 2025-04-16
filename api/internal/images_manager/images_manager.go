@@ -48,7 +48,7 @@ func CheckImage(formFile *multipart.FileHeader) error {
 	if !slices.Contains(supportedExtensions, filepath.Ext(formFile.Filename)) {
 		return fmt.Errorf("Valid image formats are: " + strings.Join(supportedExtensions, ", "))
 	}
-	
+
 	maxFileSize := int64(8388608) // 8 MB in bytes
 	if formFile.Size > maxFileSize {
 		return fmt.Errorf("file size exceeds 8 MB limit")
