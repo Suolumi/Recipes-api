@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"os"
 	"recipes/cmd/config"
 	"recipes/internal/handlers"
 )
@@ -18,6 +19,17 @@ func main() {
 	cfg, err := config.NewConfig("RECIPES")
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	dirs := []string{
+		cfg.Cfg.RecipeImageDir,
+		cfg.Cfg.ImagesDir,
+	}
+
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			log.Fatal(err)
+		}
 	}
 
 	hdl, err := handlers.New(cfg)
