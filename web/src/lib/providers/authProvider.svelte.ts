@@ -1,5 +1,7 @@
 import {getContext, setContext} from "svelte";
 import {browser, dev} from "$app/environment";
+import {fetcher as fetch, setFetcherContext} from "$lib/utils/fetcher.js";
+import type {User} from "$lib/utils/types";
 
 interface AuthTokens {
     access_token: string;
@@ -23,6 +25,7 @@ const isAuthTokens = (obj: any): obj is AuthTokens => {
 
 export class AuthContext {
     tokens = $state<AuthTokens>()
+    user = $state<User>()
 
     constructor() {
         if (!browser) return;
@@ -32,23 +35,31 @@ export class AuthContext {
 
             if (isAuthTokens(tokens)) {
                 this.tokens = tokens;
-                void this.authenticate()
+                setFetcherContext(this);
+                void this.fetchProfile();
             } else {
-                dev && console.warn('User not authenticated');
+                dev && console.warn('No valid auth tokens in localStorage.');
             }
         } catch (error) {
-            dev && console.error('Failed to parse tokens from localStorage:', error);
+            dev && console.error('Token parse error:', error instanceof Error ? error.message : error);
         }
     }
 
-    async authenticate(): Promise<void> {
-        // TODO: Implement
-        throw new Error('authenticate method not implemented');
+    async fetchProfile(): Promise<void> {
+        const response = await fetch('/users/me', undefined, true)
+
+        if (response.ok) {
+            this.user = await response.json();
+        }
     }
 
-    async fetchProfile(): Promise<void> {
-        // TODO: Implement
-        throw new Error('fetchProfile method not implemented');
+    clear(): void {
+        this.tokens = undefined;
+        this.user = undefined;
+
+        if (browser) {
+            localStorage.removeItem('tokens');
+        }
     }
 }
 
