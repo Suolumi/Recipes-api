@@ -3,3 +3,4 @@ api/assets
 .idea
 .vscode
 .envrc
+node_modules
