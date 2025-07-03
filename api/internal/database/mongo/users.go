@@ -149,12 +149,10 @@ func (c *Client) UserConflicts(user models.UserDB) (models.UserDB, error) {
 			continue
 		}
 
-		jsonName := fieldInfos.Tag.Get("json")
-		// Split to remove potential ,omitempty
 		bsonName := strings.Split(fieldInfos.Tag.Get("bson"), ",")[0]
 
 		if cursor := c.db.Collection(userCollection).FindOne(context.TODO(), bson.M{bsonName: field.Interface()}); !errors.Is(cursor.Decode(&dbUser), mongo.ErrNoDocuments) {
-			return dbUser, fmt.Errorf("%s is already taken", jsonName)
+			return dbUser, fmt.Errorf("%s is already taken", bsonName)
 		}
 
 	}

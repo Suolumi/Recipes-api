@@ -1,10 +1,8 @@
 <script lang="ts">
-	import '../../app.css';
-    import {createAuthContext} from "$lib/providers/authProvider.svelte";
+	import Header from '$lib/components/Header.svelte';
 
 	let { children } = $props();
-
-    createAuthContext();
 </script>
 
+<Header />
 {@render children()}
