@@ -73,7 +73,7 @@ const Oven = HeatingStyle("oven")
 const Microwave = HeatingStyle("microwave")
 const HotPlate = HeatingStyle("hot-plate")
 const Barbecue = HeatingStyle("barbecue")
-const NoHeating = HeatingStyle("no-heating")
+const NoHeating = HeatingStyle("none")
 const OtherHeating = HeatingStyle("other")
 
 type CreateRecipe struct {

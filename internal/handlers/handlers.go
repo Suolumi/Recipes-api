@@ -9,7 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"recipes/cmd/config"
+	"recipes/internal/config"
 	"recipes/internal/database"
 	"recipes/internal/database/mongo"
 	"recipes/internal/images_manager"

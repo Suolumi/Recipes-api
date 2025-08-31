@@ -3,7 +3,7 @@ package main
 import (
 	"log"
 	"os"
-	"recipes/cmd/config"
+	"recipes/internal/config"
 	"recipes/internal/handlers"
 )
 
