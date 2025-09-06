@@ -7,6 +7,7 @@ import (
 	"recipes/internal/images_manager"
 	"recipes/internal/jwt_manager"
 	"recipes/internal/models"
+	"recipes/internal/utils"
 )
 
 // @Summary Create Recipe
@@ -53,7 +54,7 @@ func (h *Handlers) CreateRecipe(c echo.Context) error {
 // @Router /recipes [get]
 func (h *Handlers) GetRecipes(c echo.Context) error {
 	var body models.GetRecipesRequest
-	err := c.Bind(&body)
+	err := utils.BindQuery(c, &body)
 	if err != nil {
 		return errorResponse(http.StatusBadRequest, err.Error(), err, c)
 	}
