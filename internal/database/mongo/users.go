@@ -121,19 +121,19 @@ func (c *Client) GetUsers(username string, limit, offset int) ([]models.UserDB, 
 	return users, number, nil
 }
 
-func (c *Client) CreateUser(user models.UserDB) (string, error) {
+func (c *Client) CreateUser(user models.UserDB) (models.UserDB, error) {
 	hashedPassword, err := utils.HashPassword(user.Password)
 	if err != nil {
-		return "", err
+		return models.UserDB{}, err
 	}
 
 	user.Password = hashedPassword
 
 	cursor, err := c.db.Collection(userCollection).InsertOne(context.TODO(), user)
 	if err != nil {
-		return "", err
+		return models.UserDB{}, err
 	}
-	return cursor.InsertedID.(primitive.ObjectID).Hex(), nil
+	return c.GetUserById(cursor.InsertedID.(primitive.ObjectID).Hex())
 }
 
 func (c *Client) UserConflicts(user models.UserDB) (models.UserDB, error) {

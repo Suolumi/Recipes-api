@@ -2,19 +2,17 @@ package models
 
 import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
-	"recipes/internal/utils"
 )
 
 type GetRecipesRequest struct {
-	Limit           int             `query:"limit,omitempty"`
-	Offset          int             `query:"offset,omitempty"`
-	Author          string          `query:"author,omitempty"`
-	Title           string          `query:"title,omitempty"`
-	PreparationTime *utils.Duration `query:"preparationTime,omitempty"`
-	TotalTime       *utils.Duration `query:"totalTime"`
-	Heating         []HeatingStyle  `query:"heating,omitempty"`
-	Ingredients     []string        `query:"ingredients,omitempty"`
-	Kind            RecipeKind      `query:"kind,omitempty"`
+	Limit           int        `query:"limit,omitempty"`
+	Offset          int        `query:"offset,omitempty"`
+	Author          string     `query:"author,omitempty"`
+	Title           string     `query:"title,omitempty"`
+	PreparationTime int        `query:"preparation_time,omitempty"`
+	TotalTime       int        `query:"total_time"`
+	Ingredients     []string   `query:"ingredients,omitempty"`
+	Kind            RecipeKind `query:"kind,omitempty"`
 }
 
 type GetRecipesResponse struct {
@@ -23,17 +21,16 @@ type GetRecipesResponse struct {
 }
 
 type UpdateRecipeRequest struct {
-	Title           string          `bson:"title,omitempty" json:"title,omitempty"`
-	Description     string          `bson:"description,omitempty" json:"description,omitempty"`
-	Quantity        float64         `bson:"quantity,omitempty" json:"quantity,omitempty"`
-	Kind            RecipeKind      `bson:"kind,omitempty" json:"kind,omitempty"`
-	PreparationTime *utils.Duration `bson:"preparationTime,omitempty" json:"preparationTime,omitempty"`
-	CookingTime     *utils.Duration `bson:"cookingTime,omitempty" json:"cookingTime,omitempty"`
-	RestingTime     *utils.Duration `bson:"restingTime,omitempty" json:"restingTime,omitempty"`
-	Heating         []HeatingStyle  `bson:"heating,omitempty" json:"heating,omitempty"`
-	Ingredients     []Ingredient    `bson:"ingredients,omitempty" json:"ingredients,omitempty"`
-	Steps           []Step          `bson:"steps,omitempty" json:"steps,omitempty"`
-	Pictures        []string        `bson:"pictures,omitempty" json:"pictures,omitempty"`
+	Title           string       `bson:"title,omitempty" json:"title,omitempty"`
+	Description     string       `bson:"description,omitempty" json:"description,omitempty"`
+	Quantity        int          `bson:"quantity,omitempty" json:"quantity,omitempty"`
+	Kind            RecipeKind   `bson:"kind,omitempty" json:"kind,omitempty"`
+	PreparationTime int          `bson:"preparation_time,omitempty" json:"preparation_time,omitempty"`
+	CookingTime     int          `bson:"cooking_time,omitempty" json:"cooking_time,omitempty"`
+	RestingTime     int          `bson:"resting_time,omitempty" json:"resting_time,omitempty"`
+	Ingredients     []Ingredient `bson:"ingredients,omitempty" json:"ingredients,omitempty"`
+	Steps           []Step       `bson:"steps,omitempty" json:"steps,omitempty"`
+	Pictures        []string     `bson:"pictures,omitempty" json:"pictures,omitempty"`
 }
 
 type RecipeKind string
@@ -46,7 +43,6 @@ var RecipeKinds = []RecipeKind{
 	Sauce,
 	Dessert,
 	Drink,
-	OtherRecipe,
 }
 
 const Snack = RecipeKind("snack")
@@ -56,38 +52,18 @@ const SideDish = RecipeKind("side-dish")
 const Sauce = RecipeKind("sauce")
 const Dessert = RecipeKind("dessert")
 const Drink = RecipeKind("drink")
-const OtherRecipe = RecipeKind("other")
-
-type HeatingStyle string
-
-var HeatingStyles = []HeatingStyle{
-	Oven,
-	Microwave,
-	HotPlate,
-	Barbecue,
-	NoHeating,
-	OtherHeating,
-}
-
-const Oven = HeatingStyle("oven")
-const Microwave = HeatingStyle("microwave")
-const HotPlate = HeatingStyle("hot-plate")
-const Barbecue = HeatingStyle("barbecue")
-const NoHeating = HeatingStyle("none")
-const OtherHeating = HeatingStyle("other")
 
 type CreateRecipe struct {
-	Title           string          `bson:"title,omitempty" json:"title,omitempty"`
-	Description     string          `bson:"description,omitempty" json:"description,omitempty"`
-	Quantity        float64         `bson:"quantity,omitempty" json:"quantity,omitempty"`
-	Kind            RecipeKind      `bson:"kind,omitempty" json:"kind,omitempty"`
-	PreparationTime *utils.Duration `bson:"preparationTime,omitempty" json:"preparationTime,omitempty"`
-	CookingTime     *utils.Duration `bson:"cookingTime,omitempty" json:"cookingTime,omitempty"`
-	RestingTime     *utils.Duration `bson:"restingTime,omitempty" json:"restingTime,omitempty"`
-	Heating         []HeatingStyle  `bson:"heating,omitempty" json:"heating,omitempty"`
-	Ingredients     []Ingredient    `bson:"ingredients,omitempty" json:"ingredients,omitempty"`
-	Steps           []Step          `bson:"steps,omitempty" json:"steps,omitempty"`
-	Pictures        []string        `bson:"pictures,omitempty" json:"pictures,omitempty"`
+	Title           string       `bson:"title,omitempty" json:"title,omitempty"`
+	Description     string       `bson:"description,omitempty" json:"description,omitempty"`
+	Quantity        int          `bson:"quantity,omitempty" json:"quantity,omitempty"`
+	Kind            RecipeKind   `bson:"kind,omitempty" json:"kind,omitempty"`
+	PreparationTime int          `bson:"preparation_time,omitempty" json:"preparation_time,omitempty"`
+	CookingTime     int          `bson:"cooking_time,omitempty" json:"cooking_time,omitempty"`
+	RestingTime     int          `bson:"resting_time,omitempty" json:"resting_time,omitempty"`
+	Ingredients     []Ingredient `bson:"ingredients,omitempty" json:"ingredients,omitempty"`
+	Steps           []Step       `bson:"steps,omitempty" json:"steps,omitempty"`
+	Pictures        []string     `bson:"pictures,omitempty" json:"pictures,omitempty"`
 }
 
 type RecipeDB struct {
@@ -95,12 +71,11 @@ type RecipeDB struct {
 	Id              *primitive.ObjectID `bson:"_id,omitempty" json:"id,omitempty"`
 	Title           string              `bson:"title,omitempty" json:"title,omitempty"`
 	Description     string              `bson:"description,omitempty" json:"description,omitempty"`
-	Quantity        float64             `bson:"quantity,omitempty" json:"quantity,omitempty"`
+	Quantity        int                 `bson:"quantity,omitempty" json:"quantity,omitempty"`
 	Kind            RecipeKind          `bson:"kind,omitempty" json:"kind,omitempty"`
-	PreparationTime *utils.Duration     `bson:"preparationTime,omitempty" json:"preparationTime,omitempty"`
-	CookingTime     *utils.Duration     `bson:"cookingTime,omitempty" json:"cookingTime,omitempty"`
-	RestingTime     *utils.Duration     `bson:"restingTime,omitempty" json:"restingTime,omitempty"`
-	Heating         []HeatingStyle      `bson:"heating,omitempty" json:"heating,omitempty"`
+	PreparationTime int                 `bson:"preparation_time,omitempty" json:"preparation_time,omitempty"`
+	CookingTime     int                 `bson:"cooking_time,omitempty" json:"cooking_time,omitempty"`
+	RestingTime     int                 `bson:"resting_time,omitempty" json:"resting_time,omitempty"`
 	Ingredients     []Ingredient        `bson:"ingredients,omitempty" json:"ingredients,omitempty"`
 	Steps           []Step              `bson:"steps,omitempty" json:"steps,omitempty"`
 	Pictures        []string            `bson:"pictures,omitempty" json:"pictures,omitempty"`
@@ -112,12 +87,11 @@ type Recipe struct {
 	Id              *primitive.ObjectID `bson:"_id,omitempty" json:"id,omitempty"`
 	Title           string              `bson:"title,omitempty" json:"title,omitempty"`
 	Description     string              `bson:"description,omitempty" json:"description,omitempty"`
-	Quantity        float64             `bson:"quantity,omitempty" json:"quantity,omitempty"`
+	Quantity        int                 `bson:"quantity,omitempty" json:"quantity,omitempty"`
 	Kind            RecipeKind          `bson:"kind,omitempty" json:"kind,omitempty"`
-	PreparationTime *utils.Duration     `bson:"preparationTime,omitempty" json:"preparationTime,omitempty"`
-	CookingTime     *utils.Duration     `bson:"cookingTime,omitempty" json:"cookingTime,omitempty"`
-	RestingTime     *utils.Duration     `bson:"restingTime,omitempty" json:"restingTime,omitempty"`
-	Heating         []HeatingStyle      `bson:"heating,omitempty" json:"heating,omitempty"`
+	PreparationTime int                 `bson:"preparation_time,omitempty" json:"preparation_time,omitempty"`
+	CookingTime     int                 `bson:"cooking_time,omitempty" json:"cooking_time,omitempty"`
+	RestingTime     int                 `bson:"resting_time,omitempty" json:"resting_time,omitempty"`
 	Ingredients     []Ingredient        `bson:"ingredients,omitempty" json:"ingredients,omitempty"`
 	Steps           []Step              `bson:"steps,omitempty" json:"steps,omitempty"`
 	Pictures        []string            `bson:"pictures,omitempty" json:"pictures,omitempty"`
@@ -126,22 +100,23 @@ type Recipe struct {
 type RecipePreview struct {
 	Id              *primitive.ObjectID `bson:"_id,omitempty" json:"id,omitempty"`
 	Title           string              `bson:"title,omitempty" json:"title,omitempty"`
+	Description     string              `bson:"description,omitempty" json:"description,omitempty"`
 	Author          *UserView           `bson:"author,omitempty" json:"author,omitempty"`
-	PreparationTime *utils.Duration     `bson:"preparationTime,omitempty" json:"preparationTime,omitempty"`
-	CookingTime     *utils.Duration     `bson:"cookingTime,omitempty" json:"cookingTime,omitempty"`
-	RestingTime     *utils.Duration     `bson:"restingTime,omitempty" json:"restingTime,omitempty"`
+	PreparationTime int                 `bson:"preparation_time,omitempty" json:"preparation_time,omitempty"`
+	CookingTime     int                 `bson:"cooking_time,omitempty" json:"cooking_time,omitempty"`
+	RestingTime     int                 `bson:"resting_time,omitempty" json:"resting_time,omitempty"`
 	Kind            RecipeKind          `bson:"kind,omitempty" json:"kind,omitempty"`
-	Quantity        float64             `bson:"quantity,omitempty" json:"quantity,omitempty"`
+	Quantity        int                 `bson:"quantity,omitempty" json:"quantity,omitempty"`
 	Pictures        []string            `bson:"pictures,omitempty" json:"pictures,omitempty"`
 }
 
 type Ingredient struct {
-	Name     string  `bson:"name,omitempty" json:"name,omitempty"`
-	Quantity float64 `bson:"quantity,omitempty" json:"quantity,omitempty"`
-	Unit     string  `bson:"unit,omitempty" json:"unit,omitempty"`
+	Name     string `bson:"name,omitempty" json:"name"`
+	Quantity int    `bson:"quantity,omitempty" json:"quantity"`
+	Unit     string `bson:"unit,omitempty" json:"unit"`
 }
 
 type Step struct {
-	Title       string `bson:"title,omitempty" json:"title,omitempty"`
-	Description string `bson:"description,omitempty" json:"description,omitempty"`
+	Title       string `bson:"title,omitempty" json:"title"`
+	Description string `bson:"description,omitempty" json:"description"`
 }

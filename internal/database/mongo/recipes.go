@@ -138,9 +138,6 @@ func (c *Client) GetRecipes(parameters models.GetRecipesRequest) ([]models.Recip
 		pipeline = append(pipeline, bson.D{{"$match", bson.D{{"kind", primitive.Regex{Pattern: string(parameters.Kind), Options: "i"}}}}})
 	}
 
-	if len(parameters.Heating) > 0 {
-		pipeline = append(pipeline, bson.D{{"$match", bson.M{"heating": bson.M{"$in": parameters.Heating}}}})
-	}
 	if len(parameters.Ingredients) > 0 {
 		pipeline = append(pipeline, bson.D{{"$match", bson.M{"ingredients.name": bson.M{"$all": parameters.Ingredients}}}})
 	}
@@ -156,23 +153,23 @@ func (c *Client) GetRecipes(parameters models.GetRecipesRequest) ([]models.Recip
 		count++
 	}
 
-	if (parameters.PreparationTime != nil && parameters.PreparationTime.Milliseconds() != 0) || (parameters.TotalTime != nil && parameters.TotalTime.Milliseconds() != 0) {
-		if parameters.PreparationTime.Milliseconds() != 0 {
+	if parameters.PreparationTime != 0 || parameters.TotalTime != 0 {
+		if parameters.PreparationTime != 0 {
 			pipeline = append(pipeline, bson.D{{"$addFields", bson.D{
 				{"diffPrepTime", bson.D{
 					{"$abs", bson.A{
-						bson.D{{"$subtract", bson.A{"$preparationTime.duration", parameters.PreparationTime.Duration}}},
+						bson.D{{"$subtract", bson.A{"$preparationTime", parameters.PreparationTime}}},
 					}},
 				}},
 			}}})
 		}
-		if parameters.TotalTime.Milliseconds() != 0 {
+		if parameters.TotalTime != 0 {
 			pipeline = append(pipeline, bson.D{{"$addFields", bson.D{
 				{"diffTotalTime", bson.D{
 					{"$abs", bson.A{
 						bson.D{{"$subtract", bson.A{
-							bson.D{{"$add", bson.A{"$preparationTime.duration", "$cookingTime.duration", "$restingTime.duration"}}}, // Sum of the three fields
-							parameters.TotalTime.Duration,
+							bson.D{{"$add", bson.A{"$preparationTime", "$cookingTime", "$restingTime"}}}, // Sum of the three fields
+							parameters.TotalTime,
 						}}},
 					}},
 				}},

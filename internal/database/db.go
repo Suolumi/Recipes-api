@@ -3,7 +3,7 @@ package database
 import "recipes/internal/models"
 
 type Database interface {
-	CreateUser(user models.UserDB) (string, error)
+	CreateUser(user models.UserDB) (models.UserDB, error)
 	GetUsers(username string, limit, offset int) ([]models.UserDB, int64, error)
 	GetUserById(id string) (models.UserDB, error)
 	UpdateUserById(id string, user models.UserDB) (models.UserDB, error)

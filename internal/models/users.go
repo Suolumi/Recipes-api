@@ -31,7 +31,7 @@ type GetUsersResponse struct {
 type UserView struct {
 	Id       *primitive.ObjectID `bson:"_id,omitempty" json:"id,omitempty"`
 	Username string              `bson:"username,omitempty" json:"username,omitempty"`
-	Email    string              `bson:"email,omitempty" json:"email,omitempty"`
+	Email    string              `bson:"email,omitempty" json:"-"`
 	Password string              `bson:"password,omitempty" json:"-"`
 	Picture  string              `bson:"picture,omitempty" json:"picture,omitempty"`
 }

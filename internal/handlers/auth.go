@@ -64,7 +64,7 @@ func (h *Handlers) Login(c echo.Context) error {
 // @accept json
 // @produce json
 // @Param request body models.RegisterRequest true "Register request"
-// @Success 201 {object} models.MessageResponse "User created"
+// @Success 201 {object} models.RegisterResponse "User created"
 // @Failure 400 {object} models.ErrorResponse "Bad Request"
 // @Failure 406 {object} models.ErrorResponse "Password not strong enough / Invalid mail / Invalid username"
 // @Failure 409 {object} models.ErrorResponse "User already exists"
@@ -100,7 +100,7 @@ func (h *Handlers) Register(c echo.Context) error {
 	}
 
 	// Create user
-	_, err = h.db.CreateUser(models.UserDB{
+	createdUser, err := h.db.CreateUser(models.UserDB{
 		Username: user.Username,
 		Email:    user.Email,
 		Password: user.Password,
@@ -109,20 +109,22 @@ func (h *Handlers) Register(c echo.Context) error {
 		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
 	}
 
-	//_, token, err := h.jm.GenerateRegisterJwt(id, time.Hour*24*7)
-	//if err != nil {
-	//	return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
-	//}
-	//
-	//err = h.ms.SendMail("Log in with Echo",
-	//	[]string{user.Email},
-	//	h.ms.RegisterMail, map[string]string{
-	//		"username":     user.Username,
-	//		"redirect_url": "https://app.echo-app.fr/validate/" + token,
-	//	})
-	//if err != nil {
-	//	return errorResponse(http.StatusInternalServerError, "Could not send the verification mail", err, c)
-	//}
+	accessJwt, accessToken, err := h.jm.GenerateAccessJwt(createdUser.Id.Hex(), createdUser.Admin, h.jwt.AccessExpiration)
+	if err != nil {
+		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
+	}
 
-	return messageResponse(http.StatusCreated, "User created", c)
+	refreshJwt, refreshToken, err := h.jm.GenerateRefreshJwt(createdUser.Id.Hex(), createdUser.Admin, h.jwt.RefreshExpiration)
+	if err != nil {
+		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
+	}
+
+	return c.JSON(http.StatusOK, models.RegisterResponse{
+		AccessToken:           accessToken,
+		ExpiresIn:             int(accessJwt.ExpiresAt.Sub(time.Now()).Seconds()),
+		ExpiresAt:             accessJwt.ExpiresAt.Time,
+		RefreshToken:          refreshToken,
+		RefreshTokenExpiresIn: int(refreshJwt.ExpiresAt.Sub(time.Now()).Seconds()),
+		RefreshTokenExpiresAt: refreshJwt.ExpiresAt.Time,
+	})
 }

@@ -87,7 +87,12 @@ func (h *Handlers) GetRecipes(c echo.Context) error {
 // @Security BearerAuth
 // @Router /recipes/:id [get]
 func (h *Handlers) GetRecipe(c echo.Context) error {
-	return c.JSON(http.StatusOK, c.Get("recipe"))
+	recipeId := c.Param("id")
+	recipe, err := h.db.GetRecipeById(recipeId)
+	if err != nil {
+		return errorResponse(http.StatusNotFound, err.Error(), err, c)
+	}
+	return c.JSON(http.StatusOK, recipe)
 }
 
 // @Summary Update Recipe
