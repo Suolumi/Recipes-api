@@ -12,7 +12,9 @@ COPY . ./
 RUN go mod download
 
 # Build
-RUN go build ./cmd/api
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o /app/api ./cmd/api
+
+RUN chmod +x ./api
 
 # Optional:
 # To bind to a TCP port, runtime parameters must be supplied to the docker command.
@@ -24,7 +26,7 @@ EXPOSE 8080
 FROM gcr.io/distroless/static-debian12
 
 WORKDIR /app
-COPY --from=builder --chmod=755 /app/api /app/api
+COPY --from=builder /app/api /app/api
 COPY --from=builder /app/assets /app/assets
 
 ENTRYPOINT ["/app/api"]
