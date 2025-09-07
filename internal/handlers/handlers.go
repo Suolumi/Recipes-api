@@ -94,8 +94,8 @@ func (h *Handlers) RegisterEndpoints() {
 		}
 	}
 
-	unprotectedRouter := h.e.Group("")
-	protectedRouter := h.e.Group("")
+	unprotectedRouter := h.e.Group("/api/v1")
+	protectedRouter := h.e.Group("/api/v1")
 
 	unprotectedRouter.POST("/login", h.Login)
 	unprotectedRouter.POST("/register", h.Register)
