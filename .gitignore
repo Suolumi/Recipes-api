@@ -4,3 +4,4 @@ api/assets
 .vscode
 .envrc
 node_modules
+api
