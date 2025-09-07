@@ -94,19 +94,20 @@ func (h *Handlers) RegisterEndpoints() {
 		}
 	}
 
-	unprotectedRouter := h.e.Group("/api/v1")
-	protectedRouter := h.e.Group("/api/v1")
+	basePathRouter := h.e.Group("/api/v1")
+	unprotectedRouter := basePathRouter.Group("")
+	protectedRouter := basePathRouter.Group("",
+		h.QueryJwt,
+		echojwt.WithConfig(echojwt.Config{
+			NewClaimsFunc: jwt_manager.NewJwtClaims[models.AccessJwt],
+			SigningKey:    []byte(h.jwt.AccessSecret),
+			ContextKey:    "jwt",
+		}),
+	)
 
 	unprotectedRouter.POST("/login", h.Login)
 	unprotectedRouter.POST("/register", h.Register)
 	unprotectedRouter.POST("/refresh", h.Refresh)
-
-	protectedRouter.Use(h.QueryJwt)
-	protectedRouter.Use(echojwt.WithConfig(echojwt.Config{
-		NewClaimsFunc: jwt_manager.NewJwtClaims[models.AccessJwt],
-		SigningKey:    []byte(h.jwt.AccessSecret),
-		ContextKey:    "jwt",
-	}))
 
 	unprotectedRouter.Static("/pictures", h.cfg.ImagesDir)
 
