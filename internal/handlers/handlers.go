@@ -94,9 +94,8 @@ func (h *Handlers) RegisterEndpoints() {
 		}
 	}
 
-	basePathRouter := h.e.Group("/api/v1")
-	unprotectedRouter := basePathRouter.Group("")
-	protectedRouter := basePathRouter.Group("",
+	unprotectedRouter := h.e.Group("/api/v1")
+	protectedRouter := h.e.Group("/api/v1",
 		h.QueryJwt,
 		echojwt.WithConfig(echojwt.Config{
 			NewClaimsFunc: jwt_manager.NewJwtClaims[models.AccessJwt],
