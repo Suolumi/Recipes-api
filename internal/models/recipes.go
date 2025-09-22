@@ -21,16 +21,16 @@ type GetRecipesResponse struct {
 }
 
 type UpdateRecipeRequest struct {
-	Title           string       `bson:"title,omitempty" json:"title,omitempty"`
-	Description     string       `bson:"description,omitempty" json:"description,omitempty"`
-	Quantity        int          `bson:"quantity,omitempty" json:"quantity,omitempty"`
-	Kind            RecipeKind   `bson:"kind,omitempty" json:"kind,omitempty"`
-	PreparationTime int          `bson:"preparation_time,omitempty" json:"preparation_time,omitempty"`
-	CookingTime     int          `bson:"cooking_time,omitempty" json:"cooking_time,omitempty"`
-	RestingTime     int          `bson:"resting_time,omitempty" json:"resting_time,omitempty"`
-	Ingredients     []Ingredient `bson:"ingredients,omitempty" json:"ingredients,omitempty"`
-	Steps           []Step       `bson:"steps,omitempty" json:"steps,omitempty"`
-	Pictures        []string     `bson:"pictures,omitempty" json:"pictures,omitempty"`
+	Title           string       `bson:"title,omitempty" json:"title"`
+	Description     string       `bson:"description,omitempty" json:"description"`
+	Quantity        int          `bson:"quantity,omitempty" json:"quantity"`
+	Kind            RecipeKind   `bson:"kind,omitempty" json:"kind"`
+	PreparationTime int          `bson:"preparation_time,omitempty" json:"preparation_time"`
+	CookingTime     int          `bson:"cooking_time,omitempty" json:"cooking_time"`
+	RestingTime     int          `bson:"resting_time,omitempty" json:"resting_time"`
+	Ingredients     []Ingredient `bson:"ingredients,omitempty" json:"ingredients"`
+	Steps           []Step       `bson:"steps,omitempty" json:"steps"`
+	Pictures        []string     `bson:"pictures,omitempty" json:"pictures"`
 }
 
 type RecipeKind string
@@ -54,60 +54,60 @@ const Dessert = RecipeKind("dessert")
 const Drink = RecipeKind("drink")
 
 type CreateRecipe struct {
-	Title           string       `bson:"title,omitempty" json:"title,omitempty"`
-	Description     string       `bson:"description,omitempty" json:"description,omitempty"`
-	Quantity        int          `bson:"quantity,omitempty" json:"quantity,omitempty"`
-	Kind            RecipeKind   `bson:"kind,omitempty" json:"kind,omitempty"`
-	PreparationTime int          `bson:"preparation_time,omitempty" json:"preparation_time,omitempty"`
-	CookingTime     int          `bson:"cooking_time,omitempty" json:"cooking_time,omitempty"`
-	RestingTime     int          `bson:"resting_time,omitempty" json:"resting_time,omitempty"`
-	Ingredients     []Ingredient `bson:"ingredients,omitempty" json:"ingredients,omitempty"`
-	Steps           []Step       `bson:"steps,omitempty" json:"steps,omitempty"`
-	Pictures        []string     `bson:"pictures,omitempty" json:"pictures,omitempty"`
+	Title           string       `bson:"title,omitempty" json:"title"`
+	Description     string       `bson:"description,omitempty" json:"description"`
+	Quantity        int          `bson:"quantity,omitempty" json:"quantity"`
+	Kind            RecipeKind   `bson:"kind,omitempty" json:"kind"`
+	PreparationTime int          `bson:"preparation_time,omitempty" json:"preparation_time"`
+	CookingTime     int          `bson:"cooking_time,omitempty" json:"cooking_time"`
+	RestingTime     int          `bson:"resting_time,omitempty" json:"resting_time"`
+	Ingredients     []Ingredient `bson:"ingredients,omitempty" json:"ingredients"`
+	Steps           []Step       `bson:"steps,omitempty" json:"steps"`
+	Pictures        []string     `bson:"pictures,omitempty" json:"pictures"`
 }
 
 type RecipeDB struct {
-	Author          *primitive.ObjectID `bson:"author,omitempty" json:"author,omitempty"`
-	Id              *primitive.ObjectID `bson:"_id,omitempty" json:"id,omitempty"`
-	Title           string              `bson:"title,omitempty" json:"title,omitempty"`
-	Description     string              `bson:"description,omitempty" json:"description,omitempty"`
-	Quantity        int                 `bson:"quantity,omitempty" json:"quantity,omitempty"`
-	Kind            RecipeKind          `bson:"kind,omitempty" json:"kind,omitempty"`
-	PreparationTime int                 `bson:"preparation_time,omitempty" json:"preparation_time,omitempty"`
-	CookingTime     int                 `bson:"cooking_time,omitempty" json:"cooking_time,omitempty"`
-	RestingTime     int                 `bson:"resting_time,omitempty" json:"resting_time,omitempty"`
-	Ingredients     []Ingredient        `bson:"ingredients,omitempty" json:"ingredients,omitempty"`
-	Steps           []Step              `bson:"steps,omitempty" json:"steps,omitempty"`
-	Pictures        []string            `bson:"pictures,omitempty" json:"pictures,omitempty"`
+	Author          *primitive.ObjectID `bson:"author,omitempty" json:"author"`
+	Id              *primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	Title           string              `bson:"title,omitempty" json:"title"`
+	Description     string              `bson:"description,omitempty" json:"description"`
+	Quantity        int                 `bson:"quantity,omitempty" json:"quantity"`
+	Kind            RecipeKind          `bson:"kind,omitempty" json:"kind"`
+	PreparationTime int                 `bson:"preparation_time,omitempty" json:"preparation_time"`
+	CookingTime     int                 `bson:"cooking_time,omitempty" json:"cooking_time"`
+	RestingTime     int                 `bson:"resting_time,omitempty" json:"resting_time"`
+	Ingredients     []Ingredient        `bson:"ingredients,omitempty" json:"ingredients"`
+	Steps           []Step              `bson:"steps,omitempty" json:"steps"`
+	Pictures        []string            `bson:"pictures,omitempty" json:"pictures"`
 }
 
 // Recipe has bson fields to unfold the author when getting the document
 type Recipe struct {
-	Author          *UserView           `bson:"author,omitempty" json:"author,omitempty"`
-	Id              *primitive.ObjectID `bson:"_id,omitempty" json:"id,omitempty"`
-	Title           string              `bson:"title,omitempty" json:"title,omitempty"`
-	Description     string              `bson:"description,omitempty" json:"description,omitempty"`
-	Quantity        int                 `bson:"quantity,omitempty" json:"quantity,omitempty"`
-	Kind            RecipeKind          `bson:"kind,omitempty" json:"kind,omitempty"`
-	PreparationTime int                 `bson:"preparation_time,omitempty" json:"preparation_time,omitempty"`
-	CookingTime     int                 `bson:"cooking_time,omitempty" json:"cooking_time,omitempty"`
-	RestingTime     int                 `bson:"resting_time,omitempty" json:"resting_time,omitempty"`
-	Ingredients     []Ingredient        `bson:"ingredients,omitempty" json:"ingredients,omitempty"`
-	Steps           []Step              `bson:"steps,omitempty" json:"steps,omitempty"`
-	Pictures        []string            `bson:"pictures,omitempty" json:"pictures,omitempty"`
+	Author          *UserView           `bson:"author,omitempty" json:"author"`
+	Id              *primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	Title           string              `bson:"title,omitempty" json:"title"`
+	Description     string              `bson:"description,omitempty" json:"description"`
+	Quantity        int                 `bson:"quantity,omitempty" json:"quantity"`
+	Kind            RecipeKind          `bson:"kind,omitempty" json:"kind"`
+	PreparationTime int                 `bson:"preparation_time,omitempty" json:"preparation_time"`
+	CookingTime     int                 `bson:"cooking_time,omitempty" json:"cooking_time"`
+	RestingTime     int                 `bson:"resting_time,omitempty" json:"resting_time"`
+	Ingredients     []Ingredient        `bson:"ingredients,omitempty" json:"ingredients"`
+	Steps           []Step              `bson:"steps,omitempty" json:"steps"`
+	Pictures        []string            `bson:"pictures,omitempty" json:"pictures"`
 }
 
 type RecipePreview struct {
-	Id              *primitive.ObjectID `bson:"_id,omitempty" json:"id,omitempty"`
-	Title           string              `bson:"title,omitempty" json:"title,omitempty"`
-	Description     string              `bson:"description,omitempty" json:"description,omitempty"`
-	Author          *UserView           `bson:"author,omitempty" json:"author,omitempty"`
-	PreparationTime int                 `bson:"preparation_time,omitempty" json:"preparation_time,omitempty"`
-	CookingTime     int                 `bson:"cooking_time,omitempty" json:"cooking_time,omitempty"`
-	RestingTime     int                 `bson:"resting_time,omitempty" json:"resting_time,omitempty"`
-	Kind            RecipeKind          `bson:"kind,omitempty" json:"kind,omitempty"`
-	Quantity        int                 `bson:"quantity,omitempty" json:"quantity,omitempty"`
-	Pictures        []string            `bson:"pictures,omitempty" json:"pictures,omitempty"`
+	Id              *primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	Title           string              `bson:"title,omitempty" json:"title"`
+	Description     string              `bson:"description,omitempty" json:"description"`
+	Author          *UserView           `bson:"author,omitempty" json:"author"`
+	PreparationTime int                 `bson:"preparation_time,omitempty" json:"preparation_time"`
+	CookingTime     int                 `bson:"cooking_time,omitempty" json:"cooking_time"`
+	RestingTime     int                 `bson:"resting_time,omitempty" json:"resting_time"`
+	Kind            RecipeKind          `bson:"kind,omitempty" json:"kind"`
+	Quantity        int                 `bson:"quantity,omitempty" json:"quantity"`
+	Pictures        []string            `bson:"pictures,omitempty" json:"pictures"`
 }
 
 type Ingredient struct {
