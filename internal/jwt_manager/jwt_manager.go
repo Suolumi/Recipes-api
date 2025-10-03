@@ -5,13 +5,17 @@ import (
 	"fmt"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/labstack/echo/v4"
-	"recipes/internal/config"
 	"recipes/internal/models"
 	"time"
 )
 
 type JwtManager struct {
-	config.JwtConfig
+	AccessSecret      string
+	AccessExpiration  time.Duration
+	RefreshSecret     string
+	RefreshExpiration time.Duration
+	ResetSecret       string
+	ResetExpiration   time.Duration
 }
 
 func NewJwtClaims[T any](_ echo.Context) jwt.Claims {
@@ -74,5 +78,18 @@ func (m *JwtManager) GenerateRefreshJwt(id string, admin bool, validity time.Dur
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signedString, err := token.SignedString([]byte(m.RefreshSecret))
+	return claims, signedString, err
+}
+
+func (m *JwtManager) GenerateResetJwt(id string, validity time.Duration) (*models.ResetJwt, string, error) {
+	claims := &models.ResetJwt{
+		UserId: id,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(validity)),
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signedString, err := token.SignedString([]byte(m.ResetSecret))
 	return claims, signedString, err
 }

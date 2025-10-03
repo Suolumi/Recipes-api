@@ -26,3 +26,8 @@ type RefreshJwt struct {
 	Admin  bool   `json:"admin"`
 	jwt.RegisteredClaims
 }
+
+type ResetJwt struct {
+	UserId string `json:"id"`
+	jwt.RegisteredClaims
+}

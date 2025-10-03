@@ -30,3 +30,12 @@ type RegisterRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
 }
+
+type ForgotPasswordRequest struct {
+	Identifier string `json:"id,omitempty"`
+	Locale     string `json:"locale,omitempty"`
+}
+
+type ResetPasswordRequest struct {
+	Password string `json:"password"`
+}

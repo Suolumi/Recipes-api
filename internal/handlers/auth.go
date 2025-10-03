@@ -1,8 +1,10 @@
 package handlers
 
 import (
+	"fmt"
 	"github.com/labstack/echo/v4"
 	"net/http"
+	"recipes/internal/jwt_manager"
 	"recipes/internal/models"
 	"recipes/internal/utils"
 	"time"
@@ -127,4 +129,69 @@ func (h *Handlers) Register(c echo.Context) error {
 		RefreshTokenExpiresIn: int(refreshJwt.ExpiresAt.Sub(time.Now()).Seconds()),
 		RefreshTokenExpiresAt: refreshJwt.ExpiresAt.Time,
 	})
+}
+
+func (h *Handlers) ForgotPassword(c echo.Context) error {
+	var data models.ForgotPasswordRequest
+
+	err := c.Bind(&data)
+	if err != nil || data.Identifier == "" {
+		return errorResponse(http.StatusBadRequest, "Missing informations", err, c)
+	}
+
+	user, err := h.db.UserConflicts(models.UserDB{
+		Email:    data.Identifier,
+		Username: data.Identifier,
+	})
+	if err == nil {
+		return errorResponse(http.StatusNotFound, "User not found", nil, c)
+	}
+
+	_, token, err := h.jm.GenerateResetJwt(user.Id.Hex(), time.Hour*24*7)
+	if err != nil {
+		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
+	}
+
+	if data.Locale == "" {
+		data.Locale = "en"
+	}
+	err = h.ms.SendMail("Password reinitialization",
+		[]string{user.Email},
+		h.ms.ResetPasswordMail, map[string]string{
+			"USER_NAME":  user.Username,
+			"RESET_LINK": fmt.Sprintf("https://recipes.suolumi.fr/%s/forgot-password/%s", data.Locale, token),
+			"USER_EMAIL": user.Email,
+		})
+	if err != nil {
+		return errorResponse(http.StatusInternalServerError, "Could not send the verification mail", err, c)
+	}
+
+	return messageResponse(http.StatusOK, "Email sent", c)
+}
+
+func (h *Handlers) ResetPassword(c echo.Context) error {
+	token := c.Param("token")
+	var data models.ResetPasswordRequest
+
+	jwt, err := jwt_manager.DecodeJWT[models.ResetJwt](h.jm.ResetSecret, token)
+	if err != nil {
+		return errorResponse(http.StatusUnauthorized, err.Error(), err, c)
+	}
+
+	if jwt.ExpiresAt == nil || jwt.ExpiresAt.Before(time.Now()) {
+		return errorResponse(http.StatusUnauthorized, "Token expired", nil, c)
+	}
+
+	err = c.Bind(&data)
+	if err != nil || !utils.IsPasswordValid(data.Password) {
+		return errorResponse(http.StatusNotAcceptable, "Password must contain at least 10 characters, 1 number and 1 special character", err, c)
+	}
+
+	if _, err = h.db.UpdateUserById(jwt.UserId, models.UserDB{
+		Password: data.Password,
+	}); err != nil {
+		return errorResponse(http.StatusInternalServerError, "Could not update the password", err, c)
+	}
+
+	return messageResponse(http.StatusOK, "Password reset", c)
 }

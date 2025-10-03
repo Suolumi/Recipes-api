@@ -14,6 +14,7 @@ import (
 	"recipes/internal/database/mongo"
 	"recipes/internal/images_manager"
 	"recipes/internal/jwt_manager"
+	"recipes/internal/mail_sender"
 	"recipes/internal/models"
 	"recipes/internal/utils"
 )
@@ -24,6 +25,7 @@ type Handlers struct {
 	jm     *jwt_manager.JwtManager
 	jwt    *config.JwtConfig
 	cfg    *config.RuntimeConfig
+	ms     *mail_sender.MailSender
 	imgLru *expirable.LRU[string, bool]
 }
 
@@ -33,9 +35,7 @@ func New(cfg *config.Config) (*Handlers, error) {
 		return nil, err
 	}
 
-	jm := jwt_manager.JwtManager{
-		JwtConfig: *cfg.Jwt,
-	}
+	jm := jwt_manager.JwtManager(*cfg.Jwt)
 
 	// Create admin user
 	if user, err := db.UserConflicts(models.UserDB{
@@ -71,6 +71,7 @@ func New(cfg *config.Config) (*Handlers, error) {
 		jm:     &jm,
 		jwt:    cfg.Jwt,
 		cfg:    cfg.Cfg,
+		ms:     mail_sender.New(cfg.Mails),
 		imgLru: imgLru,
 	}, nil
 }
@@ -107,6 +108,8 @@ func (h *Handlers) RegisterEndpoints() {
 	unprotectedRouter.POST("/login", h.Login)
 	unprotectedRouter.POST("/register", h.Register)
 	unprotectedRouter.POST("/refresh", h.Refresh)
+	unprotectedRouter.POST("/forgot-password", h.ForgotPassword)
+	unprotectedRouter.POST("/forgot-password/:token", h.ResetPassword)
 
 	unprotectedRouter.Static("/pictures", h.cfg.ImagesDir)
 

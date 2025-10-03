@@ -1,6 +1,7 @@
 package config
 
 import (
+	"recipes/internal/mail_sender"
 	"recipes/internal/utils"
 	"time"
 )
@@ -10,6 +11,8 @@ type JwtConfig struct {
 	AccessExpiration  time.Duration
 	RefreshSecret     string
 	RefreshExpiration time.Duration
+	ResetSecret       string
+	ResetExpiration   time.Duration
 }
 
 type DatabaseConfig struct {
@@ -33,10 +36,11 @@ type LruConfig struct {
 }
 
 type Config struct {
-	Db  *DatabaseConfig
-	Jwt *JwtConfig
-	Cfg *RuntimeConfig
-	Lru *LruConfig
+	Db    *DatabaseConfig
+	Jwt   *JwtConfig
+	Cfg   *RuntimeConfig
+	Lru   *LruConfig
+	Mails *mail_sender.MailSenderConfig
 }
 
 func NewConfig(prefix ...string) (*Config, error) {
@@ -54,12 +58,20 @@ func NewConfig(prefix ...string) (*Config, error) {
 			AccessExpiration:  time.Hour,
 			RefreshSecret:     "",
 			RefreshExpiration: time.Hour * 24 * 7 * 30,
+			ResetSecret:       "",
+			ResetExpiration:   time.Hour * 24 * 2,
 		},
 		Cfg: &RuntimeConfig{
 			Port:           8080,
 			WebappUrl:      "http://localhost:5173",
 			ImagesDir:      "assets/pictures",
 			RecipeImageDir: "assets/recipeImages",
+		},
+		Mails: &mail_sender.MailSenderConfig{
+			Host:     "",
+			Email:    "",
+			Password: "",
+			MailsDir: "assets/mails",
 		},
 		Lru: &LruConfig{
 			RecipeImageTimeout: time.Hour,
