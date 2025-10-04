@@ -1,9 +1,11 @@
 package handlers
 
 import (
+	"errors"
 	"github.com/labstack/echo/v4"
 	"golang.org/x/exp/slices"
 	"net/http"
+	mongo2 "recipes/internal/database/mongo"
 	"recipes/internal/images_manager"
 	"recipes/internal/jwt_manager"
 	"recipes/internal/models"
@@ -37,6 +39,13 @@ func (h *Handlers) CreateRecipe(c echo.Context) error {
 		h.imgLru.Add(k, false)
 		h.imgLru.Remove(k)
 	}
+	go func() {
+		locale, err := h.t.GetRecipeLocale(recipe)
+		if err != nil {
+			return
+		}
+		_, _ = h.db.AddLocaleRecipe(recipe, locale)
+	}()
 	return c.JSON(http.StatusCreated, recipe)
 }
 
@@ -54,6 +63,7 @@ func (h *Handlers) CreateRecipe(c echo.Context) error {
 // @Router /recipes [get]
 func (h *Handlers) GetRecipes(c echo.Context) error {
 	var body models.GetRecipesRequest
+	// TODO send back recipes from all collections
 	err := utils.BindQuery(c, &body)
 	if err != nil {
 		return errorResponse(http.StatusBadRequest, err.Error(), err, c)
@@ -89,9 +99,32 @@ func (h *Handlers) GetRecipes(c echo.Context) error {
 // @Router /recipes/:id [get]
 func (h *Handlers) GetRecipe(c echo.Context) error {
 	recipeId := c.Param("id")
-	recipe, err := h.db.GetRecipeById(recipeId)
-	if err != nil {
-		return errorResponse(http.StatusNotFound, err.Error(), err, c)
+	locale := c.QueryParam("locale")
+	var recipe models.Recipe
+	var err error
+	if locale == "" {
+		recipe, err = h.db.GetRecipeById(recipeId)
+		if err != nil {
+			return errorResponse(http.StatusNotFound, err.Error(), err, c)
+		}
+	} else {
+		recipe, err = h.db.GetRecipeByIdLocale(recipeId, locale)
+		if err != nil && errors.Is(err, mongo2.NotFoundError) {
+			recipe, err = h.db.GetRecipeById(recipeId)
+			if err != nil {
+				return errorResponse(http.StatusNotFound, err.Error(), err, c)
+			}
+			recipe, err = h.t.TranslateRecipe(recipe, locale)
+			if err != nil {
+				return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
+			}
+			_, err := h.db.AddLocaleRecipe(recipe, locale)
+			if err != nil {
+				return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
+			}
+		} else if err != nil {
+			return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
+		}
 	}
 	return c.JSON(http.StatusOK, recipe)
 }
@@ -143,6 +176,14 @@ func (h *Handlers) UpdateRecipe(c echo.Context) error {
 	if err != nil {
 		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
 	}
+
+	go func() {
+		locale, err := h.t.GetRecipeLocale(updated)
+		if err != nil {
+			return
+		}
+		_, _ = h.db.AddLocaleRecipe(updated, locale)
+	}()
 	return c.JSON(http.StatusOK, updated)
 }
 

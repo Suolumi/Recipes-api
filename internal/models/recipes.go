@@ -43,6 +43,7 @@ var RecipeKinds = []RecipeKind{
 	Sauce,
 	Dessert,
 	Drink,
+	Plate,
 }
 
 const Snack = RecipeKind("snack")
@@ -52,6 +53,7 @@ const SideDish = RecipeKind("side-dish")
 const Sauce = RecipeKind("sauce")
 const Dessert = RecipeKind("dessert")
 const Drink = RecipeKind("drink")
+const Plate = RecipeKind("plate")
 
 type CreateRecipe struct {
 	Title           string       `bson:"title,omitempty" json:"title"`
@@ -95,6 +97,23 @@ type Recipe struct {
 	Ingredients     []Ingredient        `bson:"ingredients,omitempty" json:"ingredients"`
 	Steps           []Step              `bson:"steps,omitempty" json:"steps"`
 	Pictures        []string            `bson:"pictures,omitempty" json:"pictures"`
+}
+
+func (r *Recipe) ToRecipeDB() RecipeDB {
+	return RecipeDB{
+		Author:          r.Author.Id,
+		Id:              r.Id,
+		Title:           r.Title,
+		Description:     r.Description,
+		Quantity:        r.Quantity,
+		Kind:            r.Kind,
+		PreparationTime: r.PreparationTime,
+		CookingTime:     r.CookingTime,
+		RestingTime:     r.RestingTime,
+		Ingredients:     r.Ingredients,
+		Steps:           r.Steps,
+		Pictures:        r.Pictures,
+	}
 }
 
 type RecipePreview struct {

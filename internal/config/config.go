@@ -2,6 +2,7 @@ package config
 
 import (
 	"recipes/internal/mail_sender"
+	"recipes/internal/translator"
 	"recipes/internal/utils"
 	"time"
 )
@@ -36,11 +37,12 @@ type LruConfig struct {
 }
 
 type Config struct {
-	Db    *DatabaseConfig
-	Jwt   *JwtConfig
-	Cfg   *RuntimeConfig
-	Lru   *LruConfig
-	Mails *mail_sender.MailSenderConfig
+	Db         *DatabaseConfig
+	Jwt        *JwtConfig
+	Cfg        *RuntimeConfig
+	Lru        *LruConfig
+	Translator *translator.TranslatorConfig
+	Mails      *mail_sender.MailSenderConfig
 }
 
 func NewConfig(prefix ...string) (*Config, error) {
@@ -75,6 +77,9 @@ func NewConfig(prefix ...string) (*Config, error) {
 		},
 		Lru: &LruConfig{
 			RecipeImageTimeout: time.Hour,
+		},
+		Translator: &translator.TranslatorConfig{
+			ApiKey: "",
 		},
 	}
 

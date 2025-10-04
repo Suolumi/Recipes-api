@@ -12,8 +12,10 @@ type Database interface {
 	UserConflicts(user models.UserDB) (models.UserDB, error)
 
 	CreateRecipe(authorId string, infos *models.CreateRecipe) (models.Recipe, error)
+	AddLocaleRecipe(recipe models.Recipe, locale string) (models.Recipe, error)
 	GetRecipes(parameters models.GetRecipesRequest) ([]models.RecipePreview, int64, error)
 	GetRecipeById(id string) (models.Recipe, error)
+	GetRecipeByIdLocale(id string, locale string) (models.Recipe, error)
 	UpdateRecipeById(id string, recipe *models.UpdateRecipeRequest) (models.Recipe, error)
 	DeleteRecipeById(id string) (models.RecipeDB, error)
 	RecipeConflicts(recipe models.RecipeDB) (models.RecipeDB, error)

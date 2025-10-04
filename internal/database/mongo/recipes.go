@@ -16,6 +16,8 @@ import (
 
 const recipesCollection string = "recipes"
 
+var NotFoundError = errors.New("recipe not found")
+
 var recipeAuthorPipeline = mongo.Pipeline{
 	bson.D{{"$lookup", bson.D{
 		{"from", userCollection},
@@ -24,6 +26,10 @@ var recipeAuthorPipeline = mongo.Pipeline{
 		{"as", "author"},
 	}}},
 	bson.D{{"$unwind", "$author"}},
+}
+
+func getLocaleCollection(locale string) string {
+	return fmt.Sprintf("%s_%s", recipesCollection, locale)
 }
 
 func (c *Client) transformRecipe(cursor *mongo.Cursor) ([]models.Recipe, error) {
@@ -65,6 +71,18 @@ func (c *Client) CreateRecipe(authorId string, infos *models.CreateRecipe) (mode
 	return c.GetRecipeById(cursor.InsertedID.(primitive.ObjectID).Hex())
 }
 
+func (c *Client) AddLocaleRecipe(recipe models.Recipe, locale string) (models.Recipe, error) {
+	if locale == "" {
+		locale = "en"
+	}
+
+	cursor, err := c.db.Collection(getLocaleCollection(locale)).InsertOne(context.TODO(), recipe.ToRecipeDB())
+	if err != nil {
+		return models.Recipe{}, err
+	}
+	return c.GetRecipeById(cursor.InsertedID.(primitive.ObjectID).Hex())
+}
+
 func (c *Client) UpdateRecipeById(id string, recipe *models.UpdateRecipeRequest) (models.Recipe, error) {
 	objectId, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
@@ -82,7 +100,7 @@ func (c *Client) UpdateRecipeById(id string, recipe *models.UpdateRecipeRequest)
 	return c.GetRecipeById(id)
 }
 
-func (c *Client) GetRecipeById(id string) (models.Recipe, error) {
+func (c *Client) getRecipeById(id string, collection string) (models.Recipe, error) {
 	objectId, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
 		return models.Recipe{}, err
@@ -92,7 +110,7 @@ func (c *Client) GetRecipeById(id string) (models.Recipe, error) {
 		{"_id", objectId},
 	}}}}, recipeAuthorPipeline...)
 
-	cursor, err := c.db.Collection(recipesCollection).Aggregate(context.TODO(), stages)
+	cursor, err := c.db.Collection(collection).Aggregate(context.TODO(), stages)
 	if err != nil {
 		return models.Recipe{}, err
 	}
@@ -101,9 +119,17 @@ func (c *Client) GetRecipeById(id string) (models.Recipe, error) {
 		return models.Recipe{}, err
 	}
 	if recipes == nil {
-		return models.Recipe{}, errors.New("recipe not found")
+		return models.Recipe{}, NotFoundError
 	}
 	return recipes[0], nil
+}
+
+func (c *Client) GetRecipeById(id string) (models.Recipe, error) {
+	return c.getRecipeById(id, recipesCollection)
+}
+
+func (c *Client) GetRecipeByIdLocale(id string, locale string) (models.Recipe, error) {
+	return c.getRecipeById(id, getLocaleCollection(locale))
 }
 
 func (c *Client) DeleteRecipeById(id string) (models.RecipeDB, error) {
@@ -117,7 +143,7 @@ func (c *Client) DeleteRecipeById(id string) (models.RecipeDB, error) {
 		"_id": objectId,
 	})
 	if err := cursor.Decode(&recipe); errors.Is(err, mongo.ErrNoDocuments) {
-		return recipe, fmt.Errorf("recipe not found")
+		return recipe, NotFoundError
 	}
 	return recipe, nil
 }

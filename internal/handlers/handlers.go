@@ -16,6 +16,7 @@ import (
 	"recipes/internal/jwt_manager"
 	"recipes/internal/mail_sender"
 	"recipes/internal/models"
+	"recipes/internal/translator"
 	"recipes/internal/utils"
 )
 
@@ -26,6 +27,7 @@ type Handlers struct {
 	jwt    *config.JwtConfig
 	cfg    *config.RuntimeConfig
 	ms     *mail_sender.MailSender
+	t      *translator.Translator
 	imgLru *expirable.LRU[string, bool]
 }
 
@@ -65,6 +67,11 @@ func New(cfg *config.Config) (*Handlers, error) {
 		}
 	}, cfg.Lru.RecipeImageTimeout)
 
+	transl, err := translator.New(cfg.Translator)
+	if err != nil {
+		utils.LogError("Failed to create translator", err)
+	}
+
 	return &Handlers{
 		db:     db,
 		e:      echo.New(),
@@ -72,6 +79,7 @@ func New(cfg *config.Config) (*Handlers, error) {
 		jwt:    cfg.Jwt,
 		cfg:    cfg.Cfg,
 		ms:     mail_sender.New(cfg.Mails),
+		t:      transl,
 		imgLru: imgLru,
 	}, nil
 }
