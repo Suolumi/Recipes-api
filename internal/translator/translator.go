@@ -36,7 +36,6 @@ func (t *Translator) TranslateRecipe(recipe models.Recipe, to string) (models.Re
 	var stepTitles []string
 	var stepDesc []string
 
-	fmt.Println(recipe.Ingredients)
 	for _, ingredient := range recipe.Ingredients {
 		ingredients = append(ingredients, ingredient.Name)
 		ingredientsUnit = append(ingredientsUnit, ingredient.Unit)
@@ -62,6 +61,7 @@ func (t *Translator) TranslateRecipe(recipe models.Recipe, to string) (models.Re
 	if err != nil {
 		return models.Recipe{}, err
 	}
+	fmt.Println(translations)
 
 	var ing []models.Ingredient
 	ingName := strings.Split(translations[2].Text, "@")
