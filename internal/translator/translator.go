@@ -2,7 +2,6 @@ package translator
 
 import (
 	"cloud.google.com/go/translate"
-	"fmt"
 	"golang.org/x/net/context"
 	"golang.org/x/text/language"
 	"google.golang.org/api/option"
@@ -48,11 +47,11 @@ func (t *Translator) TranslateRecipe(recipe models.Recipe, to string) (models.Re
 	input := []string{
 		recipe.Title,
 		recipe.Description,
-		strings.Join(ingredients, "@"),
-		strings.Join(stepTitles, "@"),
-		strings.Join(stepDesc, "@"),
-		strings.Join(ingredientsUnit, "@"),
 	}
+	input = append(input, ingredients...)
+	input = append(input, stepTitles...)
+	input = append(input, stepDesc...)
+	input = append(input, ingredientsUnit...)
 	baseTo := language.MustParse(to)
 	translations, err := t.client.Translate(context.TODO(), input, baseTo, &translate.Options{
 		Format: translate.Text,
@@ -61,25 +60,24 @@ func (t *Translator) TranslateRecipe(recipe models.Recipe, to string) (models.Re
 	if err != nil {
 		return models.Recipe{}, err
 	}
-	fmt.Println(translations)
 
 	var ing []models.Ingredient
-	ingName := strings.Split(translations[2].Text, "@")
-	ingUnit := strings.Split(translations[5].Text, "@")
+	ingName := translations[2 : 2+len(ingredients)]
+	ingUnit := translations[2+len(ingredients)+len(stepTitles)+len(stepDesc):]
 	for i, ingredient := range recipe.Ingredients {
 		ing = append(ing, models.Ingredient{
-			Name:     ingName[i],
+			Name:     ingName[i].Text,
 			Quantity: ingredient.Quantity,
-			Unit:     ingUnit[i],
+			Unit:     ingUnit[i].Text,
 		})
 	}
 	var st []models.Step
-	stTitle := strings.Split(translations[3].Text, "@")
-	stDesc := strings.Split(translations[4].Text, "@")
+	stTitle := translations[2+len(ingredients) : 2+len(ingredients)+len(stepTitles)]
+	stDesc := translations[2+len(ingredients)+len(stepTitles) : 2+len(ingredients)+len(stepTitles)+len(stepDesc)]
 	for i := range recipe.Steps {
 		st = append(st, models.Step{
-			Title:       stTitle[i],
-			Description: stDesc[i],
+			Title:       stTitle[i].Text,
+			Description: stDesc[i].Text,
 		})
 	}
 	return models.Recipe{
