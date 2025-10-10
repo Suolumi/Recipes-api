@@ -130,9 +130,9 @@ type RecipePreview struct {
 }
 
 type Ingredient struct {
-	Name     string `bson:"name,omitempty" json:"name"`
-	Quantity int    `bson:"quantity,omitempty" json:"quantity"`
-	Unit     string `bson:"unit,omitempty" json:"unit"`
+	Name     string  `bson:"name,omitempty" json:"name"`
+	Quantity float64 `bson:"quantity,omitempty" json:"quantity"`
+	Unit     string  `bson:"unit,omitempty" json:"unit"`
 }
 
 type Step struct {
