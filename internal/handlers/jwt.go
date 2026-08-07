@@ -1,9 +1,11 @@
 package handlers
 
 import (
+	"errors"
 	"fmt"
 	"github.com/labstack/echo/v4"
 	"net/http"
+	mongorepo "recipes/internal/database/mongo"
 	"recipes/internal/jwt_manager"
 	"recipes/internal/models"
 	"time"
@@ -41,19 +43,25 @@ func (h *Handlers) Refresh(c echo.Context) error {
 		return errorResponse(http.StatusBadRequest, err.Error(), err, c)
 	}
 
-	decodedJwt, err := jwt_manager.DecodeJWT[models.RefreshJwt](h.jwt.RefreshSecret, body.RefreshToken)
+	decodedJwt, err := jwt_manager.DecodeJWT[models.RefreshJwt](h.jwt.RefreshSecret, body.RefreshToken, jwt_manager.PurposeRefresh)
 	if err != nil {
-		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
+		return errorResponse(http.StatusUnauthorized, "Invalid or expired refresh token", nil, c)
+	}
+	if decodedJwt.UserId == "" {
+		return errorResponse(http.StatusUnauthorized, "Invalid or expired refresh token", nil, c)
 	}
 
 	user, err := h.db.GetUserById(decodedJwt.UserId)
 	if err != nil {
-		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
+		if errors.Is(err, mongorepo.UserNotFoundError) {
+			return errorResponse(http.StatusUnauthorized, "Invalid or expired refresh token", nil, c)
+		}
+		return errorResponse(http.StatusInternalServerError, "Could not refresh access token", err, c)
 	}
 
 	accessJwt, accessToken, err := h.jm.GenerateAccessJwt(decodedJwt.UserId, user.Admin, h.jwt.AccessExpiration)
 	if err != nil {
-		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
+		return errorResponse(http.StatusInternalServerError, "Could not generate access token", err, c)
 	}
 
 	return c.JSON(http.StatusOK, models.RefreshResponse{

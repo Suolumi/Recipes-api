@@ -1,0 +1,88 @@
+package tests
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+
+	"recipes/internal/config"
+	mongorepo "recipes/internal/database/mongo"
+	"recipes/internal/models"
+)
+
+func TestTranslationsMigrationAndSearch(t *testing.T) {
+	databaseName := "Recipes_test_" + primitive.NewObjectID().Hex()
+	db, err := mongorepo.New(&config.DatabaseConfig{
+		DefaultAddr: "mongodb://localhost:27017",
+		Name:        databaseName,
+		Timeout:     5 * time.Second,
+	})
+	if err != nil {
+		t.Skipf("local MongoDB is not available: %v", err)
+	}
+	defer func() {
+		_ = db.RawDatabase().Drop(context.Background())
+		_ = db.Close(context.Background())
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, db.EnsureIndexes(ctx))
+
+	authorID := primitive.NewObjectID()
+	users := db.RawDatabase().Collection("users")
+	_, err = users.InsertOne(ctx, bson.M{
+		"_id": authorID, "username": "migration-author", "email": "migration@example.test",
+	})
+	require.NoError(t, err)
+
+	recipeID := primitive.NewObjectID()
+	recipes := db.RawDatabase().Collection("recipes")
+	_, err = recipes.InsertOne(ctx, bson.M{
+		"_id":         recipeID,
+		"author":      authorID,
+		"title":       "Pancakes",
+		"ingredients": bson.A{bson.M{"name": "flour"}},
+		"kind":        "dish",
+	})
+	require.NoError(t, err)
+
+	translations := db.RawDatabase().Collection("recipe_translations")
+	_, err = translations.InsertOne(ctx, bson.M{
+		"_id": primitive.NewObjectID(), "recipe_id": recipeID, "locale": "fr", "title": "Existing translation",
+	})
+	require.NoError(t, err)
+	_, err = db.RawDatabase().Collection("recipes_fr").InsertOne(ctx, bson.M{
+		"_id": recipeID, "author": authorID, "title": "Crêpes", "ingredients": bson.A{bson.M{"name": "farine"}},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, db.MigrateLegacyTranslations(ctx))
+	translated, err := db.GetRecipeByIdLocale(recipeID.Hex(), "fr")
+	require.NoError(t, err)
+	assert.Equal(t, "Crêpes", translated.Title)
+	require.NotNil(t, translated.Id)
+	assert.Equal(t, recipeID.Hex(), translated.Id.Hex())
+
+	_, err = db.RawDatabase().Collection("recipes_fr").UpdateOne(ctx, bson.M{"_id": recipeID}, bson.M{"$set": bson.M{"title": "Should remain unchanged"}})
+	require.NoError(t, err)
+	require.NoError(t, db.MigrateLegacyTranslations(ctx))
+	translated, err = db.GetRecipeByIdLocale(recipeID.Hex(), "fr")
+	require.NoError(t, err)
+	assert.Equal(t, "Crêpes", translated.Title)
+
+	localizedMatches, _, err := db.GetRecipeDocuments(models.GetRecipesRequest{Title: "crêpes", SearchLocale: "fr", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, localizedMatches, 1)
+	assert.Equal(t, recipeID.Hex(), localizedMatches[0].Id.Hex())
+
+	canonicalMatches, _, err := db.GetRecipeDocuments(models.GetRecipesRequest{Title: "pancakes", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, canonicalMatches, 1)
+	assert.Equal(t, recipeID.Hex(), canonicalMatches[0].Id.Hex())
+}

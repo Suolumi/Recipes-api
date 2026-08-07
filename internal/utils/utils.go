@@ -1,9 +1,9 @@
 package utils
 
 import (
-	"fmt"
 	"github.com/labstack/echo/v4"
 	"golang.org/x/crypto/bcrypt"
+	"log"
 	"reflect"
 	"regexp"
 	"strings"
@@ -96,6 +96,10 @@ func DupStruct[T interface{}](src interface{}) T {
 	return dest
 }
 
-func LogError(message string, err error) {
-	fmt.Println(message + ": " + err.Error())
+func LogError(message string, err error, args ...interface{}) {
+	if err == nil {
+		log.Printf("%s %v", message, args)
+		return
+	}
+	log.Printf("%s: %v %v", message, err, args)
 }

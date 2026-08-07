@@ -2,6 +2,7 @@ package translator
 
 import (
 	"cloud.google.com/go/translate"
+	"fmt"
 	"golang.org/x/net/context"
 	"golang.org/x/text/language"
 	"google.golang.org/api/option"
@@ -106,12 +107,17 @@ func (t *Translator) GetRecipeLocale(recipe models.Recipe) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if len(detected) == 0 || len(detected[0]) == 0 {
+		return "", fmt.Errorf("translation service returned no detected language")
+	}
 
-	highestIndex := float64(0)
+	highestConfidence := float64(-1)
+	highestIndex := 0
 	for i, verdict := range detected[0] {
-		if verdict.Confidence > highestIndex {
-			highestIndex = float64(i)
+		if verdict.Confidence > highestConfidence {
+			highestConfidence = verdict.Confidence
+			highestIndex = i
 		}
 	}
-	return detected[0][int(highestIndex)].Language.String(), err
+	return detected[0][highestIndex].Language.String(), err
 }

@@ -1,20 +1,26 @@
 package mongo
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"reflect"
+	"regexp"
+	"strings"
+
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-	"golang.org/x/net/context"
+
 	"recipes/internal/models"
 	"recipes/internal/utils"
-	"reflect"
-	"strings"
 )
 
 const userCollection = "users"
+
+var UserNotFoundError = errors.New("user not found")
+var UserConflictError = errors.New("user conflict")
 
 func (c *Client) GetUserById(id string) (models.UserDB, error) {
 	var user models.UserDB
@@ -27,9 +33,24 @@ func (c *Client) GetUserById(id string) (models.UserDB, error) {
 		"_id": objectId,
 	})
 	if err := cursor.Decode(&user); errors.Is(err, mongo.ErrNoDocuments) {
-		return models.UserDB{}, fmt.Errorf("user not found")
+		return models.UserDB{}, UserNotFoundError
+	} else if err != nil {
+		return models.UserDB{}, err
 	}
 	return user, nil
+}
+
+func (c *Client) GetUserByIdentifier(identifier string) (models.UserDB, error) {
+	var user models.UserDB
+	filter := bson.M{"$or": []bson.M{
+		{"username": identifier},
+		{"email": identifier},
+	}}
+	err := c.db.Collection(userCollection).FindOne(context.Background(), filter).Decode(&user)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return models.UserDB{}, UserNotFoundError
+	}
+	return user, err
 }
 
 func (c *Client) UpdateUserById(id string, user models.UserDB) (models.UserDB, error) {
@@ -38,7 +59,8 @@ func (c *Client) UpdateUserById(id string, user models.UserDB) (models.UserDB, e
 		return models.UserDB{}, err
 	}
 
-	if user.Password != "" {
+	passwordChanged := user.Password != ""
+	if passwordChanged {
 		hashedPassword, err := utils.HashPassword(user.Password)
 		if err != nil {
 			return models.UserDB{}, err
@@ -47,13 +69,18 @@ func (c *Client) UpdateUserById(id string, user models.UserDB) (models.UserDB, e
 		user.Password = hashedPassword
 	}
 
+	update := bson.M{"$set": user}
+	if passwordChanged {
+		update["$inc"] = bson.M{"mcp_auth_version": 1}
+	}
 	cursor := c.db.Collection(userCollection).FindOneAndUpdate(context.TODO(), bson.M{
 		"_id": objectId,
-	}, bson.M{
-		"$set": user,
-	})
-	if err := cursor.Decode(&user); errors.Is(err, mongo.ErrNoDocuments) {
-		return models.UserDB{}, fmt.Errorf("user not found")
+	}, update)
+	var updated models.UserDB
+	if err := cursor.Decode(&updated); errors.Is(err, mongo.ErrNoDocuments) {
+		return models.UserDB{}, UserNotFoundError
+	} else if err != nil {
+		return models.UserDB{}, err
 	}
 	return c.GetUserById(id)
 }
@@ -69,8 +96,11 @@ func (c *Client) UpdateUserInterfaceById(id string, user interface{}) (models.Us
 	}, bson.M{
 		"$set": user,
 	})
-	if err := cursor.Decode(&user); errors.Is(err, mongo.ErrNoDocuments) {
-		return models.UserDB{}, fmt.Errorf("user not found")
+	var updated models.UserDB
+	if err := cursor.Decode(&updated); errors.Is(err, mongo.ErrNoDocuments) {
+		return models.UserDB{}, UserNotFoundError
+	} else if err != nil {
+		return models.UserDB{}, err
 	}
 	return c.GetUserById(id)
 }
@@ -86,7 +116,9 @@ func (c *Client) DeleteUserById(id string) (models.UserDB, error) {
 		"_id": objectId,
 	})
 	if err := cursor.Decode(&user); errors.Is(err, mongo.ErrNoDocuments) {
-		return user, fmt.Errorf("user not found")
+		return user, UserNotFoundError
+	} else if err != nil {
+		return user, err
 	}
 	return user, nil
 }
@@ -102,14 +134,16 @@ func (c *Client) GetUsers(username string, limit, offset int) ([]models.UserDB, 
 		reqOptions.SetSkip(int64(offset))
 	}
 
-	number, err := c.db.Collection(userCollection).CountDocuments(context.TODO(), bson.M{})
+	filter := bson.M{}
+	if username != "" {
+		filter["username"] = primitive.Regex{Pattern: regexp.QuoteMeta(username), Options: "i"}
+	}
+	number, err := c.db.Collection(userCollection).CountDocuments(context.TODO(), filter)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	cursor, err := c.db.Collection(userCollection).Find(context.TODO(), bson.M{
-		"username": primitive.Regex{Pattern: username, Options: "i"},
-	}, reqOptions)
+	cursor, err := c.db.Collection(userCollection).Find(context.TODO(), filter, reqOptions)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -151,8 +185,11 @@ func (c *Client) UserConflicts(user models.UserDB) (models.UserDB, error) {
 
 		bsonName := strings.Split(fieldInfos.Tag.Get("bson"), ",")[0]
 
-		if cursor := c.db.Collection(userCollection).FindOne(context.TODO(), bson.M{bsonName: field.Interface()}); !errors.Is(cursor.Decode(&dbUser), mongo.ErrNoDocuments) {
-			return dbUser, fmt.Errorf("%s is already taken", bsonName)
+		cursor := c.db.Collection(userCollection).FindOne(context.TODO(), bson.M{bsonName: field.Interface()})
+		if err := cursor.Decode(&dbUser); err == nil {
+			return dbUser, fmt.Errorf("%w: %s is already taken", UserConflictError, bsonName)
+		} else if !errors.Is(err, mongo.ErrNoDocuments) {
+			return models.UserDB{}, fmt.Errorf("check user conflict: %w", err)
 		}
 
 	}

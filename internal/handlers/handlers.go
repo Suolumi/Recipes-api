@@ -1,34 +1,47 @@
 package handlers
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"github.com/hashicorp/golang-lru/v2/expirable"
-	echojwt "github.com/labstack/echo-jwt/v4"
-	"github.com/labstack/echo/v4"
-	"github.com/labstack/echo/v4/middleware"
 	"log"
 	"net/http"
 	"os"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
+	echojwt "github.com/labstack/echo-jwt/v4"
+	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
+
+	"golang.org/x/time/rate"
 	"recipes/internal/config"
 	"recipes/internal/database"
 	"recipes/internal/database/mongo"
+	"recipes/internal/idempotency"
 	"recipes/internal/images_manager"
 	"recipes/internal/jwt_manager"
 	"recipes/internal/mail_sender"
+	"recipes/internal/mcp_auth"
+	"recipes/internal/mcp_server"
 	"recipes/internal/models"
+	"recipes/internal/recipe_service"
 	"recipes/internal/translator"
 	"recipes/internal/utils"
 )
 
 type Handlers struct {
-	db     database.Database
-	e      *echo.Echo
-	jm     *jwt_manager.JwtManager
-	jwt    *config.JwtConfig
-	cfg    *config.RuntimeConfig
-	ms     *mail_sender.MailSender
-	t      *translator.Translator
-	imgLru *expirable.LRU[string, bool]
+	db      database.Database
+	e       *echo.Echo
+	jm      *jwt_manager.JwtManager
+	jwt     *config.JwtConfig
+	cfg     *config.RuntimeConfig
+	ms      *mail_sender.MailSender
+	t       *translator.Translator
+	recipes *recipe_service.Service
+	oauth   *mcp_auth.Server
+	mcp     *mcp_server.Server
+	idem    *idempotency.Store
 }
 
 func New(cfg *config.Config) (*Handlers, error) {
@@ -36,16 +49,36 @@ func New(cfg *config.Config) (*Handlers, error) {
 	if err != nil {
 		return nil, err
 	}
+	startupTimeout := cfg.Db.Timeout
+	if startupTimeout < time.Minute {
+		startupTimeout = time.Minute
+	}
+	startupCtx, cancel := context.WithTimeout(context.Background(), startupTimeout)
+	defer cancel()
+	ready := false
+	defer func() {
+		if !ready {
+			_ = db.Close(context.Background())
+		}
+	}()
+	if err := db.EnsureIndexes(startupCtx); err != nil {
+		_ = db.Close(context.Background())
+		return nil, err
+	}
+	if err := db.MigrateLegacyTranslations(startupCtx); err != nil {
+		_ = db.Close(context.Background())
+		return nil, err
+	}
 
 	jm := jwt_manager.JwtManager(*cfg.Jwt)
 
 	// Create admin user
-	if user, err := db.UserConflicts(models.UserDB{
+	adminUser, adminConflictErr := db.UserConflicts(models.UserDB{
 		Username: cfg.Db.AdminUsername,
 		Email:    cfg.Db.AdminMail,
-	}); err != nil && !user.Admin {
-		return nil, fmt.Errorf("username or email is already taken by a non-admin user")
-	} else if err == nil {
+	})
+	switch {
+	case adminConflictErr == nil:
 		_, err = db.CreateUser(models.UserDB{
 			Username: cfg.Db.AdminUsername,
 			Email:    cfg.Db.AdminMail,
@@ -55,37 +88,59 @@ func New(cfg *config.Config) (*Handlers, error) {
 		if err != nil {
 			return nil, err
 		}
+	case errors.Is(adminConflictErr, mongo.UserConflictError) && adminUser.Admin:
+		// The configured admin already exists.
+	case errors.Is(adminConflictErr, mongo.UserConflictError):
+		return nil, fmt.Errorf("username or email is already taken by a non-admin user")
+	default:
+		return nil, fmt.Errorf("check configured admin user: %w", adminConflictErr)
 	}
-
-	imgLru := expirable.NewLRU[string, bool](0, func(filename string, hasTimeout bool) {
-		if !hasTimeout {
-			return
-		}
-		err := images_manager.Remove(cfg.Cfg.RecipeImageDir, filename)
-		if err != nil {
-			utils.LogError("Failed to remove recipe image", err)
-		}
-	}, cfg.Lru.RecipeImageTimeout)
 
 	transl, err := translator.New(cfg.Translator)
 	if err != nil {
 		utils.LogError("Failed to create translator", err)
 	}
 
-	return &Handlers{
-		db:     db,
-		e:      echo.New(),
-		jm:     &jm,
-		jwt:    cfg.Jwt,
-		cfg:    cfg.Cfg,
-		ms:     mail_sender.New(cfg.Mails),
-		t:      transl,
-		imgLru: imgLru,
-	}, nil
+	recipeService, err := recipe_service.New(db, transl, cfg.Cfg.RecipeImageDir, cfg.MCP.MaxDecodedPictureBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	oauthServer, err := mcp_auth.NewServer(context.Background(), cfg.MCP, db)
+	if err != nil {
+		return nil, err
+	}
+	mcpServer, err := mcp_server.New(context.Background(), cfg.MCP, db, recipeService, oauthServer)
+	if err != nil {
+		return nil, err
+	}
+
+	idempotencyStore, err := idempotency.New(context.Background(), db.RawDatabase(), cfg.MCP.IdempotencyTTL)
+	if err != nil {
+		return nil, err
+	}
+
+	e := echo.New()
+	e.HTTPErrorHandler = httpErrorHandler
+	handlers := &Handlers{
+		db:      db,
+		e:       e,
+		jm:      &jm,
+		jwt:     cfg.Jwt,
+		cfg:     cfg.Cfg,
+		ms:      mail_sender.New(cfg.Mails),
+		t:       transl,
+		recipes: recipeService,
+		oauth:   oauthServer,
+		mcp:     mcpServer,
+		idem:    idempotencyStore,
+	}
+	ready = true
+	return handlers, nil
 }
 
 func (h *Handlers) RegisterEndpoints() {
-	h.e.Use(middleware.CORS())
+	h.e.Use(middleware.RequestID())
 	h.e.Use(middleware.RecoverWithConfig(middleware.RecoverConfig{
 		LogErrorFunc: func(c echo.Context, err error, stack []byte) error {
 			_, _ = fmt.Fprintf(os.Stderr, "[PANIC RECOVERED] error: %v\nstack: %s\n", err, stack)
@@ -104,20 +159,57 @@ func (h *Handlers) RegisterEndpoints() {
 	}
 
 	unprotectedRouter := h.e.Group("/api/v1")
+	restCORS := middleware.CORSWithConfig(middleware.CORSConfig{
+		AllowOrigins:  []string{h.cfg.WebappUrl},
+		AllowHeaders:  []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization, "Idempotency-Key"},
+		AllowMethods:  []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions},
+		ExposeHeaders: []string{echo.HeaderXRequestID},
+	})
+	unprotectedRouter.Use(restCORS)
+	accessClaims := func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			claims, ok := c.Get("jwt").(*jwt.Token)
+			if !ok || claims == nil {
+				return errorResponse(http.StatusUnauthorized, "Invalid or expired token", nil, c)
+			}
+			access, ok := claims.Claims.(*models.AccessJwt)
+			if !ok || access.Purpose != jwt_manager.PurposeAccess || access.UserId == "" {
+				return errorResponse(http.StatusUnauthorized, "Invalid or expired token", nil, c)
+			}
+			return next(c)
+		}
+	}
 	protectedRouter := h.e.Group("/api/v1",
+		restCORS,
 		h.QueryJwt,
 		echojwt.WithConfig(echojwt.Config{
 			NewClaimsFunc: jwt_manager.NewJwtClaims[models.AccessJwt],
 			SigningKey:    []byte(h.jwt.AccessSecret),
+			SigningMethod: "HS256",
 			ContextKey:    "jwt",
 		}),
+		accessClaims,
 	)
+	authLimiter := middleware.RateLimiterWithConfig(middleware.RateLimiterConfig{
+		Store: middleware.NewRateLimiterMemoryStoreWithConfig(middleware.RateLimiterMemoryStoreConfig{
+			Rate: rate.Limit(0.5), Burst: 30, ExpiresIn: time.Minute,
+		}),
+	})
 
-	unprotectedRouter.POST("/login", h.Login)
-	unprotectedRouter.POST("/register", h.Register)
-	unprotectedRouter.POST("/refresh", h.Refresh)
-	unprotectedRouter.POST("/forgot-password", h.ForgotPassword)
-	unprotectedRouter.POST("/forgot-password/:token", h.ResetPassword)
+	// OAuth discovery and authorization for generic remote MCP clients.
+	h.e.GET("/.well-known/oauth-protected-resource/mcp", echo.WrapHandler(http.HandlerFunc(h.oauth.ProtectedResourceMetadata)))
+	h.e.GET("/.well-known/oauth-authorization-server", echo.WrapHandler(http.HandlerFunc(h.oauth.AuthorizationServerMetadata)))
+	h.e.GET("/oauth/authorize", echo.WrapHandler(http.HandlerFunc(h.oauth.Authorize)), authLimiter)
+	h.e.POST("/oauth/authorize", echo.WrapHandler(http.HandlerFunc(h.oauth.Authorize)), authLimiter)
+	h.e.POST("/oauth/token", echo.WrapHandler(http.HandlerFunc(h.oauth.Token)), authLimiter)
+	h.e.OPTIONS("/oauth/token", echo.WrapHandler(http.HandlerFunc(h.oauth.Token)))
+	h.e.Any("/mcp", echo.WrapHandler(h.mcp.Handler()))
+
+	unprotectedRouter.POST("/login", h.Login, middleware.BodyLimit("1M"), authLimiter)
+	unprotectedRouter.POST("/register", h.Register, middleware.BodyLimit("1M"), authLimiter)
+	unprotectedRouter.POST("/refresh", h.Refresh, middleware.BodyLimit("1M"), authLimiter)
+	unprotectedRouter.POST("/forgot-password", h.ForgotPassword, middleware.BodyLimit("1M"), authLimiter)
+	unprotectedRouter.POST("/forgot-password/:token", h.ResetPassword, middleware.BodyLimit("1M"), authLimiter)
 
 	unprotectedRouter.Static("/pictures", h.cfg.ImagesDir)
 
@@ -125,7 +217,7 @@ func (h *Handlers) RegisterEndpoints() {
 	protectedRouter.GET("/users/me", h.GetMe)
 	protectedRouter.PUT("/users/me", h.UpdateMe)
 	protectedRouter.DELETE("/users/me", h.DeleteMe)
-	protectedRouter.POST("/users/me/picture", h.UploadProfilePicture)
+	protectedRouter.POST("/users/me/picture", h.UploadProfilePicture, middleware.BodyLimit("10M"))
 	protectedRouter.DELETE("/users/me/picture", h.DeleteProfilePicture)
 
 	// User routes
@@ -133,24 +225,63 @@ func (h *Handlers) RegisterEndpoints() {
 	unprotectedRouter.GET("/users/:id", h.GetUser)
 	protectedRouter.PUT("/users/:id", h.UpdateUser, adminMiddleware)
 	protectedRouter.DELETE("/users/:id", h.DeleteUser, adminMiddleware)
-	protectedRouter.POST("/users/:id/picture", h.UpdateUserPicture, adminMiddleware)
+	protectedRouter.POST("/users/:id/picture", h.UpdateUserPicture, adminMiddleware, middleware.BodyLimit("10M"))
 	protectedRouter.DELETE("/users/:id/picture", h.DeleteUserPicture, adminMiddleware)
 
 	// Recipes routes
 	unprotectedRouter.GET("/recipes", h.GetRecipes)
-	protectedRouter.POST("/recipes", h.CreateRecipe)
+	protectedRouter.POST("/recipes", h.CreateRecipe, middleware.BodyLimit("90M"))
 	unprotectedRouter.GET("/recipes/:id", h.GetRecipe)
-	protectedRouter.PATCH("/recipes/:id", h.UpdateRecipe, h.RecipeAuthorMiddleware)
+	protectedRouter.PATCH("/recipes/:id", h.UpdateRecipe, h.RecipeAuthorMiddleware, middleware.BodyLimit("90M"))
 	protectedRouter.DELETE("/recipes/:id", h.DeleteRecipe, h.RecipeAuthorMiddleware)
 
 	// Recipes images
-	protectedRouter.POST("/recipe-pictures", h.SaveRecipeImage)
-	protectedRouter.DELETE("/recipe-pictures/:id", h.DeleteRecipeImage)
 	unprotectedRouter.Static("/recipe-pictures", h.cfg.RecipeImageDir)
 }
 
-func (h *Handlers) Run(port int) {
-	log.Fatal(h.e.Start(fmt.Sprintf(":%d", port)))
+func (h *Handlers) StartBackgroundMaintenance(ctx context.Context) {
+	go func() {
+		references, err := h.db.ReferencedPictures(ctx)
+		if err != nil {
+			utils.LogError("could not collect image references", err)
+			return
+		}
+		for _, directory := range []string{h.cfg.ImagesDir, h.cfg.RecipeImageDir} {
+			removed, err := images_manager.CleanupUnreferenced(directory, references, time.Now(), 24*time.Hour)
+			if err != nil {
+				utils.LogError("could not clean image directory", err, "directory", directory)
+				continue
+			}
+			if removed > 0 {
+				log.Printf("removed %d unreferenced images from %s", removed, directory)
+			}
+		}
+	}()
+}
+
+func (h *Handlers) Run(ctx context.Context, port int) error {
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = h.db.Close(closeCtx)
+	}()
+	server := h.e.Server
+	server.Addr = fmt.Sprintf(":%d", port)
+	server.ReadHeaderTimeout = 10 * time.Second
+	server.ReadTimeout = 2 * time.Minute
+	server.WriteTimeout = 2 * time.Minute
+	server.IdleTimeout = 2 * time.Minute
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = h.e.Shutdown(shutdownCtx)
+	}()
+	err := h.e.StartServer(server)
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
 }
 
 // TODO: Limiter le nombre de caractères par titre de recette

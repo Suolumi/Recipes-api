@@ -1,11 +1,13 @@
 package handlers
 
 import (
+	"errors"
 	"github.com/labstack/echo/v4"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"net/http"
 	"os"
 	"path/filepath"
+	mongorepo "recipes/internal/database/mongo"
 	"recipes/internal/images_manager"
 	"recipes/internal/jwt_manager"
 	"recipes/internal/models"
@@ -66,9 +68,12 @@ func (h *Handlers) GetUsers(c echo.Context) error {
 	if queryParams.Limit == 0 {
 		queryParams.Limit = 10
 	}
+	if queryParams.Limit < 0 || queryParams.Limit > 100 || queryParams.Offset < 0 {
+		return errorResponse(http.StatusBadRequest, "limit must be between 0 and 100 and offset must not be negative", nil, c)
+	}
 	users, nbUsers, err := h.db.GetUsers(queryParams.Username, queryParams.Limit, queryParams.Offset)
 	if err != nil {
-		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
+		return errorResponse(http.StatusInternalServerError, "Could not get users", err, c)
 	}
 	if users == nil {
 		users = []models.UserDB{}
@@ -127,8 +132,14 @@ func (h *Handlers) UpdateUser(c echo.Context) error {
 	if conflict, err := h.db.UserConflicts(models.UserDB{
 		Username: userData.Username,
 		Email:    userData.Email,
-	}); err != nil && conflict.Id.Hex() != jwt.UserId {
-		return errorResponse(http.StatusConflict, err.Error(), err, c)
+	}); err != nil {
+		if errors.Is(err, mongorepo.UserConflictError) && conflict.Id != nil && conflict.Id.Hex() == jwt.UserId {
+			// The current user may keep its own username/email.
+		} else if errors.Is(err, mongorepo.UserConflictError) {
+			return errorResponse(http.StatusConflict, "Username or email already taken", nil, c)
+		} else {
+			return errorResponse(http.StatusInternalServerError, "Could not check user conflicts", err, c)
+		}
 	}
 
 	updatedUser, err := h.db.UpdateUserById(userId, userData)
@@ -163,7 +174,7 @@ func (h *Handlers) DeleteUser(c echo.Context) error {
 		err = images_manager.Remove(h.cfg.ImagesDir, user.Picture)
 	}
 	if err != nil && !os.IsNotExist(err) {
-		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
+		return errorResponse(http.StatusInternalServerError, "Could not remove profile picture", err, c)
 	}
 
 	return c.JSON(http.StatusOK, user)
@@ -192,33 +203,34 @@ func (h *Handlers) UpdateUserPicture(c echo.Context) error {
 		return errorResponse(http.StatusBadRequest, err.Error(), err, c)
 	}
 
-	if err := images_manager.CheckImage(formFile); err != nil {
+	normalized, err := images_manager.NormalizeMultipartImage(formFile, 8<<20)
+	if err != nil {
 		return errorResponse(http.StatusNotAcceptable, err.Error(), err, c)
 	}
 
 	user, err := h.db.GetUserById(userId)
 	if err != nil {
-		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
+		return errorResponse(http.StatusInternalServerError, "Could not get user", err, c)
 	}
 
-	if user.Picture != "" {
-		err = images_manager.Remove(h.cfg.ImagesDir, user.Picture)
-		if err != nil {
-			return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
-		}
+	fileName := primitive.NewObjectID().Hex() + normalized.Extension
+	temporaryName := "." + fileName + ".tmp"
+	if err := images_manager.SaveBytes(h.cfg.ImagesDir, temporaryName, normalized.Data); err != nil {
+		return errorResponse(http.StatusInternalServerError, "Could not save the picture", err, c)
 	}
-
-	fileName := primitive.NewObjectID().Hex() + filepath.Ext(formFile.Filename)
+	if err := os.Rename(filepath.Join(h.cfg.ImagesDir, temporaryName), filepath.Join(h.cfg.ImagesDir, fileName)); err != nil {
+		_ = images_manager.Remove(h.cfg.ImagesDir, temporaryName)
+		return errorResponse(http.StatusInternalServerError, "Could not save the picture", err, c)
+	}
 	_, err = h.db.UpdateUserById(userId, models.UserDB{
 		Picture: fileName,
 	})
 	if err != nil {
+		_ = images_manager.Remove(h.cfg.ImagesDir, fileName)
 		return errorResponse(http.StatusNotFound, "User not found", err, c)
 	}
-
-	err = images_manager.Save(formFile, h.cfg.ImagesDir, fileName)
-	if err != nil {
-		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
+	if user.Picture != "" {
+		_ = images_manager.Remove(h.cfg.ImagesDir, user.Picture)
 	}
 	return c.JSON(http.StatusOK, models.UpdatePictureResponse{Id: fileName})
 }
@@ -247,11 +259,14 @@ func (h *Handlers) DeleteUserPicture(c echo.Context) error {
 		return errorResponse(http.StatusUnprocessableEntity, "No picture for this user", nil, c)
 	}
 
-	err = images_manager.Remove(h.cfg.ImagesDir, user.Picture)
-	if err != nil && os.IsNotExist(err) {
-		return errorResponse(http.StatusNotFound, "Image not found", err, c)
-	} else if err != nil {
-		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
+	if _, err := h.db.UpdateUserInterfaceById(userId, struct {
+		Picture string `bson:"picture"`
+	}{}); err != nil {
+		return errorResponse(http.StatusInternalServerError, "Could not clear profile picture", err, c)
+	}
+	fileErr := images_manager.Remove(h.cfg.ImagesDir, user.Picture)
+	if fileErr != nil && !os.IsNotExist(fileErr) {
+		return errorResponse(http.StatusInternalServerError, "Could not remove profile picture", fileErr, c)
 	}
 	return messageResponse(http.StatusOK, "Image removed successfully", c)
 }

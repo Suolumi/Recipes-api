@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
+	"os/signal"
 	"recipes/internal/config"
 	"recipes/internal/handlers"
+	"syscall"
 )
 
 // @title           Recipes API Swagger
@@ -38,5 +41,10 @@ func main() {
 	}
 
 	hdl.RegisterEndpoints()
-	hdl.Run(cfg.Cfg.Port)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	hdl.StartBackgroundMaintenance(ctx)
+	if err := hdl.Run(ctx, cfg.Cfg.Port); err != nil {
+		log.Fatal(err)
+	}
 }

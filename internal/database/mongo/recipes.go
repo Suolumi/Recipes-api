@@ -1,17 +1,21 @@
 package mongo
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"reflect"
+	"regexp"
+	"strings"
+
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 	"golang.org/x/exp/slices"
-	"golang.org/x/net/context"
+
 	"recipes/internal/models"
 	"recipes/internal/utils"
-	"reflect"
-	"strings"
 )
 
 const recipesCollection string = "recipes"
@@ -19,17 +23,13 @@ const recipesCollection string = "recipes"
 var NotFoundError = errors.New("recipe not found")
 
 var recipeAuthorPipeline = mongo.Pipeline{
-	bson.D{{"$lookup", bson.D{
-		{"from", userCollection},
-		{"localField", "author"},
-		{"foreignField", "_id"},
-		{"as", "author"},
+	bson.D{{Key: "$lookup", Value: bson.D{
+		{Key: "from", Value: userCollection},
+		{Key: "localField", Value: "author"},
+		{Key: "foreignField", Value: "_id"},
+		{Key: "as", Value: "author"},
 	}}},
-	bson.D{{"$unwind", "$author"}},
-}
-
-func getLocaleCollection(locale string) string {
-	return fmt.Sprintf("%s_%s", recipesCollection, locale)
+	bson.D{{Key: "$unwind", Value: "$author"}},
 }
 
 func (c *Client) transformRecipe(cursor *mongo.Cursor) ([]models.Recipe, error) {
@@ -71,18 +71,6 @@ func (c *Client) CreateRecipe(authorId string, infos *models.CreateRecipe) (mode
 	return c.GetRecipeById(cursor.InsertedID.(primitive.ObjectID).Hex())
 }
 
-func (c *Client) AddLocaleRecipe(recipe models.Recipe, locale string) (models.Recipe, error) {
-	if locale == "" {
-		locale = "en"
-	}
-
-	cursor, err := c.db.Collection(getLocaleCollection(locale)).InsertOne(context.TODO(), recipe.ToRecipeDB())
-	if err != nil {
-		return models.Recipe{}, err
-	}
-	return c.GetRecipeById(cursor.InsertedID.(primitive.ObjectID).Hex())
-}
-
 func (c *Client) UpdateRecipeById(id string, recipe *models.UpdateRecipeRequest) (models.Recipe, error) {
 	objectId, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
@@ -94,8 +82,11 @@ func (c *Client) UpdateRecipeById(id string, recipe *models.UpdateRecipeRequest)
 	}, bson.M{
 		"$set": recipe,
 	})
-	if err := cursor.Decode(&recipe); errors.Is(err, mongo.ErrNoDocuments) {
-		return models.Recipe{}, fmt.Errorf("recipe not found")
+	var updated models.RecipeDB
+	if err := cursor.Decode(&updated); errors.Is(err, mongo.ErrNoDocuments) {
+		return models.Recipe{}, NotFoundError
+	} else if err != nil {
+		return models.Recipe{}, err
 	}
 	return c.GetRecipeById(id)
 }
@@ -106,9 +97,9 @@ func (c *Client) getRecipeById(id string, collection string) (models.Recipe, err
 		return models.Recipe{}, err
 	}
 
-	var stages mongo.Pipeline = append([]bson.D{{{"$match", bson.D{
-		{"_id", objectId},
-	}}}}, recipeAuthorPipeline...)
+	var stages mongo.Pipeline = append([]bson.D{{
+		{Key: "$match", Value: bson.D{{Key: "_id", Value: objectId}}},
+	}}, recipeAuthorPipeline...)
 
 	cursor, err := c.db.Collection(collection).Aggregate(context.TODO(), stages)
 	if err != nil {
@@ -118,7 +109,7 @@ func (c *Client) getRecipeById(id string, collection string) (models.Recipe, err
 	if err != nil {
 		return models.Recipe{}, err
 	}
-	if recipes == nil {
+	if len(recipes) == 0 {
 		return models.Recipe{}, NotFoundError
 	}
 	return recipes[0], nil
@@ -128,8 +119,54 @@ func (c *Client) GetRecipeById(id string) (models.Recipe, error) {
 	return c.getRecipeById(id, recipesCollection)
 }
 
-func (c *Client) GetRecipeByIdLocale(id string, locale string) (models.Recipe, error) {
-	return c.getRecipeById(id, getLocaleCollection(locale))
+func (c *Client) GetRecipeByIdForAuthor(ctx context.Context, id, authorID string) (models.Recipe, error) {
+	objectID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return models.Recipe{}, err
+	}
+	authorObjectID, err := primitive.ObjectIDFromHex(authorID)
+	if err != nil {
+		return models.Recipe{}, err
+	}
+	stages := append(mongo.Pipeline{{
+		{Key: "$match", Value: bson.D{{Key: "_id", Value: objectID}, {Key: "author", Value: authorObjectID}}},
+	}}, recipeAuthorPipeline...)
+	cursor, err := c.db.Collection(recipesCollection).Aggregate(ctx, stages)
+	if err != nil {
+		return models.Recipe{}, err
+	}
+	recipes, err := c.transformRecipe(cursor)
+	if err != nil {
+		return models.Recipe{}, err
+	}
+	if len(recipes) == 0 {
+		return models.Recipe{}, NotFoundError
+	}
+	return recipes[0], nil
+}
+
+func (c *Client) ReplaceRecipeById(ctx context.Context, id string, recipe models.RecipeDB) (models.Recipe, error) {
+	objectID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return models.Recipe{}, err
+	}
+	recipe.Id = &objectID
+	result := c.db.Collection(recipesCollection).FindOneAndReplace(ctx, bson.M{"_id": objectID}, recipe, options.FindOneAndReplace().SetReturnDocument(options.After))
+	if err := result.Err(); errors.Is(err, mongo.ErrNoDocuments) {
+		return models.Recipe{}, NotFoundError
+	} else if err != nil {
+		return models.Recipe{}, err
+	}
+	return c.GetRecipeById(id)
+}
+
+func (c *Client) DeleteLocalizedRecipesByID(ctx context.Context, id string) error {
+	objectID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return err
+	}
+	_, err = c.db.Collection(translationsCollection).DeleteMany(ctx, bson.M{"recipe_id": objectID})
+	return err
 }
 
 func (c *Client) DeleteRecipeById(id string) (models.RecipeDB, error) {
@@ -144,80 +181,135 @@ func (c *Client) DeleteRecipeById(id string) (models.RecipeDB, error) {
 	})
 	if err := cursor.Decode(&recipe); errors.Is(err, mongo.ErrNoDocuments) {
 		return recipe, NotFoundError
+	} else if err != nil {
+		return recipe, err
 	}
 	return recipe, nil
 }
 
 func (c *Client) GetRecipes(parameters models.GetRecipesRequest) ([]models.RecipePreview, int64, error) {
-	var recipes []models.RecipePreview
+	documents, count, err := c.GetRecipeDocuments(parameters)
+	if err != nil {
+		return nil, 0, err
+	}
+	recipes := make([]models.RecipePreview, 0, len(documents))
+	for _, recipe := range documents {
+		recipes = append(recipes, models.RecipePreview{
+			Id: recipe.Id, Title: recipe.Title, Description: recipe.Description, Author: recipe.Author,
+			PreparationTime: recipe.PreparationTime, CookingTime: recipe.CookingTime, RestingTime: recipe.RestingTime,
+			Kind: recipe.Kind, Quantity: recipe.Quantity, Pictures: recipe.Pictures,
+			SourceLocale: recipe.SourceLocale, Locale: recipe.Locale,
+		})
+	}
+	return recipes, count, nil
+}
+
+func (c *Client) GetRecipeDocuments(parameters models.GetRecipesRequest) ([]models.Recipe, int64, error) {
 	var pipeline []bson.D
 
 	pipeline = append(pipeline, recipeAuthorPipeline...)
 
-	if parameters.Title != "" {
-		pipeline = append(pipeline, bson.D{{"$match", bson.D{{"title", primitive.Regex{Pattern: parameters.Title, Options: "i"}}}}})
+	if parameters.SearchLocale != "" && (parameters.Title != "" || len(parameters.Ingredients) > 0) {
+		translationMatch := bson.D{
+			{Key: "$expr", Value: bson.D{{Key: "$eq", Value: bson.A{"$recipe_id", "$$recipeID"}}}},
+			{Key: "locale", Value: parameters.SearchLocale},
+		}
+		if parameters.Title != "" {
+			translationMatch = append(translationMatch, bson.E{Key: "title", Value: primitive.Regex{Pattern: regexp.QuoteMeta(parameters.Title), Options: "i"}})
+		}
+		if len(parameters.Ingredients) > 0 {
+			ingredients := make([]interface{}, 0, len(parameters.Ingredients))
+			for _, ingredient := range parameters.Ingredients {
+				ingredients = append(ingredients, primitive.Regex{Pattern: regexp.QuoteMeta(ingredient), Options: "i"})
+			}
+			translationMatch = append(translationMatch, bson.E{Key: "ingredients.name", Value: bson.M{"$all": ingredients}})
+		}
+		pipeline = append(pipeline, bson.D{{Key: "$lookup", Value: bson.D{
+			{Key: "from", Value: translationsCollection},
+			{Key: "let", Value: bson.D{{Key: "recipeID", Value: "$_id"}}},
+			{Key: "pipeline", Value: mongo.Pipeline{{{Key: "$match", Value: translationMatch}}}},
+			{Key: "as", Value: "translation_match"},
+		}}}, bson.D{{Key: "$match", Value: bson.D{{Key: "translation_match.0", Value: bson.D{{Key: "$exists", Value: true}}}}}}, bson.D{{Key: "$unset", Value: "translation_match"}})
+	} else if parameters.Title != "" {
+		pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.D{{Key: "title", Value: primitive.Regex{Pattern: regexp.QuoteMeta(parameters.Title), Options: "i"}}}}})
 	}
 	if parameters.Author != "" {
-		pipeline = append(pipeline, bson.D{{"$match", bson.D{{"author.username", primitive.Regex{Pattern: parameters.Author, Options: "i"}}}}})
+		pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.D{{Key: "author.username", Value: primitive.Regex{Pattern: regexp.QuoteMeta(parameters.Author), Options: "i"}}}}})
 	}
 	if parameters.Kind != "" {
-		pipeline = append(pipeline, bson.D{{"$match", bson.D{{"kind", primitive.Regex{Pattern: string(parameters.Kind), Options: "i"}}}}})
+		pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.D{{Key: "kind", Value: primitive.Regex{Pattern: regexp.QuoteMeta(string(parameters.Kind)), Options: "i"}}}}})
 	}
 
-	if len(parameters.Ingredients) > 0 {
-		pipeline = append(pipeline, bson.D{{"$match", bson.M{"ingredients.name": bson.M{"$all": parameters.Ingredients}}}})
+	if len(parameters.Ingredients) > 0 && parameters.SearchLocale == "" {
+		ingredients := make([]interface{}, 0, len(parameters.Ingredients))
+		for _, ingredient := range parameters.Ingredients {
+			ingredients = append(ingredients, primitive.Regex{Pattern: regexp.QuoteMeta(ingredient), Options: "i"})
+		}
+		pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.D{{Key: "ingredients.name", Value: bson.M{"$all": ingredients}}}}})
 	}
 
 	// Count total number of documents before sorting without limit and skip
-	cursor, err := c.db.Collection(recipesCollection).Aggregate(context.TODO(), append(slices.Clone(pipeline), bson.D{{"$count", "total"}}))
+	cursor, err := c.db.Collection(recipesCollection).Aggregate(context.TODO(), append(slices.Clone(pipeline), bson.D{{Key: "$count", Value: "total"}}))
 	if err != nil {
 		return nil, 0, err
 	}
 
-	var count int64 = 0
-	for cursor.Next(context.Background()) {
-		count++
+	var count int64
+	if cursor.Next(context.Background()) {
+		var result struct {
+			Total int64 `bson:"total"`
+		}
+		if err := cursor.Decode(&result); err != nil {
+			return nil, 0, err
+		}
+		count = result.Total
 	}
 
 	if parameters.PreparationTime != 0 || parameters.TotalTime != 0 {
+		differenceFields := bson.A{}
 		if parameters.PreparationTime != 0 {
-			pipeline = append(pipeline, bson.D{{"$addFields", bson.D{
-				{"diffPrepTime", bson.D{
-					{"$abs", bson.A{
-						bson.D{{"$subtract", bson.A{"$preparationTime", parameters.PreparationTime}}},
+			pipeline = append(pipeline, bson.D{{Key: "$addFields", Value: bson.D{
+				{Key: "diffPrepTime", Value: bson.D{
+					{Key: "$abs", Value: bson.A{
+						bson.D{{Key: "$subtract", Value: bson.A{"$preparation_time", parameters.PreparationTime}}},
 					}},
 				}},
 			}}})
+			differenceFields = append(differenceFields, "$diffPrepTime")
 		}
 		if parameters.TotalTime != 0 {
-			pipeline = append(pipeline, bson.D{{"$addFields", bson.D{
-				{"diffTotalTime", bson.D{
-					{"$abs", bson.A{
-						bson.D{{"$subtract", bson.A{
-							bson.D{{"$add", bson.A{"$preparationTime", "$cookingTime", "$restingTime"}}}, // Sum of the three fields
+			pipeline = append(pipeline, bson.D{{Key: "$addFields", Value: bson.D{
+				{Key: "diffTotalTime", Value: bson.D{
+					{Key: "$abs", Value: bson.A{
+						bson.D{{Key: "$subtract", Value: bson.A{
+							bson.D{{Key: "$add", Value: bson.A{"$preparation_time", "$cooking_time", "$resting_time"}}},
 							parameters.TotalTime,
 						}}},
 					}},
 				}},
 			}}})
+			differenceFields = append(differenceFields, "$diffTotalTime")
 		}
-		pipeline = append(pipeline, bson.D{{"$addFields", bson.D{
-			{"combinedDifference", bson.D{
-				{"$add", bson.A{"$diffPrepTime", "$diffTotalTime"}},
+		pipeline = append(pipeline, bson.D{{Key: "$addFields", Value: bson.D{
+			{Key: "combinedDifference", Value: bson.D{
+				{Key: "$add", Value: differenceFields},
 			}},
-		}}}, bson.D{{"$sort", bson.D{
-			{"combinedDifference", 1},
+		}}}, bson.D{{Key: "$sort", Value: bson.D{
+			{Key: "combinedDifference", Value: 1},
+			{Key: "_id", Value: -1},
 		}}})
+	} else {
+		pipeline = append(pipeline, bson.D{{Key: "$sort", Value: bson.D{{Key: "_id", Value: -1}}}})
 	}
 
 	// Apply limit and offset for pagination
-	if parameters.Limit != 0 {
-		pipeline = append(pipeline, bson.D{{"$limit", parameters.Limit}})
-	} else {
-		pipeline = append(pipeline, bson.D{{"$limit", 15}})
-	}
 	if parameters.Offset != 0 {
-		pipeline = append(pipeline, bson.D{{"$skip", parameters.Offset}})
+		pipeline = append(pipeline, bson.D{{Key: "$skip", Value: parameters.Offset}})
+	}
+	if parameters.Limit != 0 {
+		pipeline = append(pipeline, bson.D{{Key: "$limit", Value: parameters.Limit}})
+	} else {
+		pipeline = append(pipeline, bson.D{{Key: "$limit", Value: 15}})
 	}
 
 	cursor, err = c.db.Collection(recipesCollection).Aggregate(context.TODO(), pipeline)
@@ -225,15 +317,39 @@ func (c *Client) GetRecipes(parameters models.GetRecipesRequest) ([]models.Recip
 		return nil, 0, err
 	}
 
-	for cursor.Next(context.Background()) {
-		var result models.RecipePreview
-		if err := cursor.Decode(&result); err != nil {
+	recipes, err := c.transformRecipe(cursor)
+	return recipes, count, err
+}
+
+func (c *Client) GetRecipesByAuthor(ctx context.Context, authorID, cursorID string, limit int) ([]models.Recipe, int64, error) {
+	authorObjectID, err := primitive.ObjectIDFromHex(authorID)
+	if err != nil {
+		return nil, 0, err
+	}
+	match := bson.D{{Key: "author", Value: authorObjectID}}
+	if cursorID != "" {
+		cursorObjectID, err := primitive.ObjectIDFromHex(cursorID)
+		if err != nil {
 			return nil, 0, err
 		}
-		recipes = append(recipes, result)
+		match = append(match, bson.E{Key: "_id", Value: bson.M{"$lt": cursorObjectID}})
 	}
-
-	return recipes, count, nil
+	pipeline := mongo.Pipeline{
+		{{Key: "$match", Value: match}},
+		{{Key: "$sort", Value: bson.D{{Key: "_id", Value: -1}}}},
+		{{Key: "$limit", Value: limit}},
+	}
+	pipeline = append(pipeline, recipeAuthorPipeline...)
+	dbCursor, err := c.db.Collection(recipesCollection).Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, 0, err
+	}
+	recipes, err := c.transformRecipe(dbCursor)
+	if err != nil {
+		return nil, 0, err
+	}
+	count, err := c.db.Collection(recipesCollection).CountDocuments(ctx, bson.M{"author": authorObjectID})
+	return recipes, count, err
 }
 
 func (c *Client) RecipeConflicts(recipe models.RecipeDB) (models.RecipeDB, error) {
@@ -253,8 +369,10 @@ func (c *Client) RecipeConflicts(recipe models.RecipeDB) (models.RecipeDB, error
 		// Split to remove potential ,omitempty
 		bsonName := strings.Split(fieldInfos.Tag.Get("bson"), ",")[0]
 
-		if cursor := c.db.Collection(recipesCollection).FindOne(context.TODO(), bson.M{bsonName: field.Interface()}); !errors.Is(cursor.Decode(&dbRecipe), mongo.ErrNoDocuments) {
+		if err := c.db.Collection(recipesCollection).FindOne(context.TODO(), bson.M{bsonName: field.Interface()}).Decode(&dbRecipe); err == nil {
 			return dbRecipe, fmt.Errorf("%s is already taken", jsonName)
+		} else if !errors.Is(err, mongo.ErrNoDocuments) {
+			return models.RecipeDB{}, fmt.Errorf("check recipe conflict: %w", err)
 		}
 	}
 

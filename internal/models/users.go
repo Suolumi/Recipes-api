@@ -37,12 +37,13 @@ type UserView struct {
 }
 
 type UserDB struct {
-	Id       *primitive.ObjectID `bson:"_id,omitempty" json:"id,omitempty"`
-	Admin    bool                `bson:"admin,omitempty" json:"admin"`
-	Username string              `bson:"username,omitempty" json:"username,omitempty"`
-	Email    string              `bson:"email,omitempty" json:"email,omitempty"`
-	Password string              `bson:"password,omitempty" json:"-"`
-	Picture  string              `bson:"picture,omitempty" json:"picture,omitempty"`
+	Id             *primitive.ObjectID `bson:"_id,omitempty" json:"id,omitempty"`
+	Admin          bool                `bson:"admin,omitempty" json:"admin"`
+	Username       string              `bson:"username,omitempty" json:"username,omitempty"`
+	Email          string              `bson:"email,omitempty" json:"email,omitempty"`
+	Password       string              `bson:"password,omitempty" json:"-"`
+	Picture        string              `bson:"picture,omitempty" json:"picture,omitempty"`
+	MCPAuthVersion int64               `bson:"mcp_auth_version,omitempty" json:"-"`
 }
 
 type UserMe struct {

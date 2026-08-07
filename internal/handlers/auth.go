@@ -1,12 +1,15 @@
 package handlers
 
 import (
+	"errors"
 	"fmt"
 	"github.com/labstack/echo/v4"
 	"net/http"
+	mongorepo "recipes/internal/database/mongo"
 	"recipes/internal/jwt_manager"
 	"recipes/internal/models"
 	"recipes/internal/utils"
+	"strings"
 	"time"
 )
 
@@ -28,26 +31,26 @@ func (h *Handlers) Login(c echo.Context) error {
 		return errorResponse(http.StatusBadRequest, err.Error(), err, c)
 	}
 
-	user, err := h.db.UserConflicts(models.UserDB{
-		Username: reqUser.Identifier,
-		Email:    reqUser.Identifier,
-	})
-	if err == nil {
-		return errorResponse(http.StatusNotFound, "Incorrect username or password", nil, c)
+	user, err := h.db.GetUserByIdentifier(reqUser.Identifier)
+	if err != nil {
+		if errors.Is(err, mongorepo.UserNotFoundError) {
+			return errorResponse(http.StatusUnauthorized, "Incorrect username or password", nil, c)
+		}
+		return errorResponse(http.StatusInternalServerError, "Could not authenticate", err, c)
 	}
 
 	if err = utils.ComparePasswords(user.Password, reqUser.Password); err != nil {
-		return errorResponse(http.StatusNotFound, "Incorrect username or password", nil, c)
+		return errorResponse(http.StatusUnauthorized, "Incorrect username or password", nil, c)
 	}
 
 	accessJwt, accessToken, err := h.jm.GenerateAccessJwt(user.Id.Hex(), user.Admin, h.jwt.AccessExpiration)
 	if err != nil {
-		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
+		return errorResponse(http.StatusInternalServerError, "Could not generate access token", err, c)
 	}
 
 	refreshJwt, refreshToken, err := h.jm.GenerateRefreshJwt(user.Id.Hex(), user.Admin, h.jwt.RefreshExpiration)
 	if err != nil {
-		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
+		return errorResponse(http.StatusInternalServerError, "Could not generate refresh token", err, c)
 	}
 
 	return c.JSON(http.StatusOK, models.LoginResponse{
@@ -98,7 +101,10 @@ func (h *Handlers) Register(c echo.Context) error {
 		Username: user.Username,
 		Email:    user.Email,
 	}); err != nil {
-		return errorResponse(http.StatusConflict, err.Error(), err, c)
+		if errors.Is(err, mongorepo.UserConflictError) {
+			return errorResponse(http.StatusConflict, "Username or email already taken", nil, c)
+		}
+		return errorResponse(http.StatusInternalServerError, "Could not check user conflicts", err, c)
 	}
 
 	// Create user
@@ -108,17 +114,17 @@ func (h *Handlers) Register(c echo.Context) error {
 		Password: user.Password,
 	})
 	if err != nil {
-		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
+		return errorResponse(http.StatusInternalServerError, "Could not create user", err, c)
 	}
 
 	accessJwt, accessToken, err := h.jm.GenerateAccessJwt(createdUser.Id.Hex(), createdUser.Admin, h.jwt.AccessExpiration)
 	if err != nil {
-		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
+		return errorResponse(http.StatusInternalServerError, "Could not generate access token", err, c)
 	}
 
 	refreshJwt, refreshToken, err := h.jm.GenerateRefreshJwt(createdUser.Id.Hex(), createdUser.Admin, h.jwt.RefreshExpiration)
 	if err != nil {
-		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
+		return errorResponse(http.StatusInternalServerError, "Could not generate refresh token", err, c)
 	}
 
 	return c.JSON(http.StatusOK, models.RegisterResponse{
@@ -139,17 +145,17 @@ func (h *Handlers) ForgotPassword(c echo.Context) error {
 		return errorResponse(http.StatusBadRequest, "Missing informations", err, c)
 	}
 
-	user, err := h.db.UserConflicts(models.UserDB{
-		Email:    data.Identifier,
-		Username: data.Identifier,
-	})
-	if err == nil {
-		return errorResponse(http.StatusNotFound, "User not found", nil, c)
+	user, err := h.db.GetUserByIdentifier(data.Identifier)
+	if errors.Is(err, mongorepo.UserNotFoundError) {
+		return messageResponse(http.StatusOK, "If the account exists, a reset email will be sent", c)
+	}
+	if err != nil {
+		return errorResponse(http.StatusInternalServerError, "Could not process the request", err, c)
 	}
 
-	_, token, err := h.jm.GenerateResetJwt(user.Id.Hex(), time.Hour*24*7)
+	_, token, err := h.jm.GenerateResetJwt(user.Id.Hex(), h.jm.ResetExpiration)
 	if err != nil {
-		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
+		return errorResponse(http.StatusInternalServerError, "Could not create reset token", err, c)
 	}
 
 	if data.Locale == "" {
@@ -159,7 +165,7 @@ func (h *Handlers) ForgotPassword(c echo.Context) error {
 		[]string{user.Email},
 		h.ms.ResetPasswordMail, map[string]string{
 			"USER_NAME":  user.Username,
-			"RESET_LINK": fmt.Sprintf("https://recipes.suolumi.fr/%s/forgot-password/%s", data.Locale, token),
+			"RESET_LINK": fmt.Sprintf("%s/%s/forgot-password/%s", strings.TrimRight(h.cfg.WebappUrl, "/"), data.Locale, token),
 			"USER_EMAIL": user.Email,
 		})
 	if err != nil {
@@ -173,9 +179,9 @@ func (h *Handlers) ResetPassword(c echo.Context) error {
 	token := c.Param("token")
 	var data models.ResetPasswordRequest
 
-	jwt, err := jwt_manager.DecodeJWT[models.ResetJwt](h.jm.ResetSecret, token)
+	jwt, err := jwt_manager.DecodeJWT[models.ResetJwt](h.jm.ResetSecret, token, jwt_manager.PurposeReset)
 	if err != nil {
-		return errorResponse(http.StatusUnauthorized, err.Error(), err, c)
+		return errorResponse(http.StatusUnauthorized, "Invalid or expired reset token", nil, c)
 	}
 
 	if jwt.ExpiresAt == nil || jwt.ExpiresAt.Before(time.Now()) {

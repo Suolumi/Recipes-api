@@ -13,6 +13,8 @@ type GetRecipesRequest struct {
 	TotalTime       int        `query:"total_time"`
 	Ingredients     []string   `query:"ingredients,omitempty"`
 	Kind            RecipeKind `query:"kind,omitempty"`
+	Locale          string     `query:"locale,omitempty"`
+	SearchLocale    string     `query:"search_locale,omitempty"`
 }
 
 type GetRecipesResponse struct {
@@ -21,16 +23,17 @@ type GetRecipesResponse struct {
 }
 
 type UpdateRecipeRequest struct {
-	Title           string       `bson:"title,omitempty" json:"title"`
-	Description     string       `bson:"description,omitempty" json:"description"`
-	Quantity        int          `bson:"quantity,omitempty" json:"quantity"`
-	Kind            RecipeKind   `bson:"kind,omitempty" json:"kind"`
-	PreparationTime int          `bson:"preparation_time,omitempty" json:"preparation_time"`
-	CookingTime     int          `bson:"cooking_time,omitempty" json:"cooking_time"`
-	RestingTime     int          `bson:"resting_time,omitempty" json:"resting_time"`
-	Ingredients     []Ingredient `bson:"ingredients,omitempty" json:"ingredients"`
-	Steps           []Step       `bson:"steps,omitempty" json:"steps"`
-	Pictures        []string     `bson:"pictures,omitempty" json:"pictures"`
+	Title           *string       `bson:"title,omitempty" json:"title,omitempty"`
+	Description     *string       `bson:"description,omitempty" json:"description,omitempty"`
+	Quantity        *int          `bson:"quantity,omitempty" json:"quantity,omitempty"`
+	Kind            *RecipeKind   `bson:"kind,omitempty" json:"kind,omitempty"`
+	PreparationTime *int          `bson:"preparation_time,omitempty" json:"preparation_time,omitempty"`
+	CookingTime     *int          `bson:"cooking_time,omitempty" json:"cooking_time,omitempty"`
+	RestingTime     *int          `bson:"resting_time,omitempty" json:"resting_time,omitempty"`
+	Ingredients     *[]Ingredient `bson:"ingredients,omitempty" json:"ingredients,omitempty"`
+	Steps           *[]Step       `bson:"steps,omitempty" json:"steps,omitempty"`
+	Locale          *string       `bson:"source_locale,omitempty" json:"locale,omitempty"`
+	KeepPictureIDs  *[]string     `bson:"-" json:"keep_picture_ids,omitempty"`
 }
 
 type RecipeKind string
@@ -65,7 +68,9 @@ type CreateRecipe struct {
 	RestingTime     int          `bson:"resting_time,omitempty" json:"resting_time"`
 	Ingredients     []Ingredient `bson:"ingredients,omitempty" json:"ingredients"`
 	Steps           []Step       `bson:"steps,omitempty" json:"steps"`
-	Pictures        []string     `bson:"pictures,omitempty" json:"pictures"`
+	Pictures        []string     `bson:"pictures,omitempty" json:"-"`
+	SourceLocale    string       `bson:"source_locale,omitempty" json:"locale,omitempty"`
+	SourceHash      string       `bson:"source_hash,omitempty" json:"-"`
 }
 
 type RecipeDB struct {
@@ -81,6 +86,9 @@ type RecipeDB struct {
 	Ingredients     []Ingredient        `bson:"ingredients,omitempty" json:"ingredients"`
 	Steps           []Step              `bson:"steps,omitempty" json:"steps"`
 	Pictures        []string            `bson:"pictures,omitempty" json:"pictures"`
+	SourceLocale    string              `bson:"source_locale,omitempty" json:"source_locale,omitempty"`
+	Locale          string              `bson:"locale,omitempty" json:"locale,omitempty"`
+	SourceHash      string              `bson:"source_hash,omitempty" json:"-"`
 }
 
 // Recipe has bson fields to unfold the author when getting the document
@@ -97,6 +105,9 @@ type Recipe struct {
 	Ingredients     []Ingredient        `bson:"ingredients,omitempty" json:"ingredients"`
 	Steps           []Step              `bson:"steps,omitempty" json:"steps"`
 	Pictures        []string            `bson:"pictures,omitempty" json:"pictures"`
+	SourceLocale    string              `bson:"source_locale,omitempty" json:"source_locale,omitempty"`
+	Locale          string              `bson:"locale,omitempty" json:"locale,omitempty"`
+	SourceHash      string              `bson:"source_hash,omitempty" json:"-"`
 }
 
 func (r *Recipe) ToRecipeDB() RecipeDB {
@@ -113,6 +124,9 @@ func (r *Recipe) ToRecipeDB() RecipeDB {
 		Ingredients:     r.Ingredients,
 		Steps:           r.Steps,
 		Pictures:        r.Pictures,
+		SourceLocale:    r.SourceLocale,
+		Locale:          r.Locale,
+		SourceHash:      r.SourceHash,
 	}
 }
 
@@ -127,6 +141,8 @@ type RecipePreview struct {
 	Kind            RecipeKind          `bson:"kind,omitempty" json:"kind"`
 	Quantity        int                 `bson:"quantity,omitempty" json:"quantity"`
 	Pictures        []string            `bson:"pictures,omitempty" json:"pictures"`
+	SourceLocale    string              `bson:"source_locale,omitempty" json:"source_locale,omitempty"`
+	Locale          string              `bson:"locale,omitempty" json:"locale,omitempty"`
 }
 
 type Ingredient struct {

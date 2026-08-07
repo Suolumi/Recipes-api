@@ -1,7 +1,9 @@
 package models
 
 type ErrorResponse struct {
-	Error string `json:"error,omitempty"`
+	Error     string `json:"error,omitempty"`
+	Code      string `json:"code,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
 }
 
 type MessageResponse struct {

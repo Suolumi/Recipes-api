@@ -1,0 +1,383 @@
+package mcp_server
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"slices"
+	"strings"
+
+	"github.com/modelcontextprotocol/go-sdk/auth"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+
+	"recipes/internal/config"
+	"recipes/internal/database"
+	"recipes/internal/idempotency"
+	"recipes/internal/mcp_auth"
+	"recipes/internal/models"
+	"recipes/internal/recipe_service"
+)
+
+const protocolVersion = "2026-07-28"
+
+type PictureInput struct {
+	Filename  string `json:"filename" jsonschema:"Original filename including .jpg, .jpeg, or .png"`
+	MediaType string `json:"media_type" jsonschema:"Declared media type: image/jpeg or image/png"`
+	Data      string `json:"data" jsonschema:"Base64-encoded image bytes"`
+}
+
+type ListInput struct {
+	Cursor string `json:"cursor,omitempty" jsonschema:"Opaque cursor returned by a previous call"`
+	Limit  int    `json:"limit,omitempty" jsonschema:"Page size from 1 to 100; defaults to 20"`
+	Locale string `json:"locale,omitempty" jsonschema:"Requested BCP 47 locale; canonical recipe is returned if translation fails"`
+}
+
+type GetInput struct {
+	RecipeID string `json:"recipe_id" jsonschema:"Recipe identifier"`
+	Locale   string `json:"locale,omitempty" jsonschema:"Requested BCP 47 locale; canonical recipe is returned if translation fails"`
+}
+
+type CreateInput struct {
+	IdempotencyKey  string              `json:"idempotency_key" jsonschema:"Unique retry key retained for 24 hours"`
+	Title           string              `json:"title"`
+	Description     string              `json:"description,omitempty"`
+	Quantity        int                 `json:"quantity"`
+	Kind            models.RecipeKind   `json:"kind" jsonschema:"One of snack, starter, dish, side-dish, sauce, dessert, drink, or plate"`
+	PreparationTime int                 `json:"preparation_time"`
+	CookingTime     int                 `json:"cooking_time"`
+	RestingTime     int                 `json:"resting_time"`
+	Ingredients     []models.Ingredient `json:"ingredients"`
+	Steps           []models.Step       `json:"steps"`
+	Locale          string              `json:"locale,omitempty" jsonschema:"BCP 47 locale of the canonical recipe; detected when omitted"`
+	Pictures        []PictureInput      `json:"pictures,omitempty" jsonschema:"Optional JPEG or PNG pictures uploaded as part of creation"`
+}
+
+type UpdateInput struct {
+	IdempotencyKey  string               `json:"idempotency_key" jsonschema:"Unique retry key retained for 24 hours"`
+	RecipeID        string               `json:"recipe_id"`
+	Title           *string              `json:"title,omitempty"`
+	Description     *string              `json:"description,omitempty"`
+	Quantity        *int                 `json:"quantity,omitempty"`
+	Kind            *models.RecipeKind   `json:"kind,omitempty"`
+	PreparationTime *int                 `json:"preparation_time,omitempty"`
+	CookingTime     *int                 `json:"cooking_time,omitempty"`
+	RestingTime     *int                 `json:"resting_time,omitempty"`
+	Ingredients     *[]models.Ingredient `json:"ingredients,omitempty"`
+	Steps           *[]models.Step       `json:"steps,omitempty"`
+	Locale          *string              `json:"locale,omitempty" jsonschema:"BCP 47 locale of the canonical recipe"`
+	KeepPictureIDs  *[]string            `json:"keep_picture_ids,omitempty" jsonschema:"Ordered existing picture IDs to retain; omit to keep all, or pass an empty list to remove all"`
+	Pictures        []PictureInput       `json:"pictures,omitempty" jsonschema:"New JPEG or PNG pictures appended in request order"`
+}
+
+type PictureOutput struct {
+	ID  string `json:"id"`
+	URL string `json:"url"`
+}
+
+type RecipeOutput struct {
+	ID              string              `json:"id"`
+	Title           string              `json:"title"`
+	Description     string              `json:"description"`
+	Quantity        int                 `json:"quantity"`
+	Kind            models.RecipeKind   `json:"kind"`
+	PreparationTime int                 `json:"preparation_time"`
+	CookingTime     int                 `json:"cooking_time"`
+	RestingTime     int                 `json:"resting_time"`
+	Ingredients     []models.Ingredient `json:"ingredients"`
+	Steps           []models.Step       `json:"steps"`
+	Pictures        []PictureOutput     `json:"pictures"`
+	SourceLocale    string              `json:"source_locale,omitempty"`
+	Locale          string              `json:"locale,omitempty"`
+}
+
+type ListOutput struct {
+	Items      []RecipeOutput `json:"items"`
+	Total      int64          `json:"total"`
+	NextCursor string         `json:"next_cursor,omitempty"`
+}
+
+type Server struct {
+	handler     http.Handler
+	recipes     *recipe_service.Service
+	idempotency *idempotency.Store
+	pictureBase string
+}
+
+func New(ctx context.Context, cfg *config.MCPConfig, db database.Database, recipes *recipe_service.Service, oauth *mcp_auth.Server) (*Server, error) {
+	store, err := idempotency.New(ctx, db.RawDatabase(), cfg.IdempotencyTTL)
+	if err != nil {
+		return nil, err
+	}
+	parsed, err := url.Parse(cfg.PublicURL)
+	if err != nil {
+		return nil, err
+	}
+	result := &Server{recipes: recipes, idempotency: store, pictureBase: parsed.Scheme + "://" + parsed.Host + "/api/v1/recipe-pictures/"}
+	server := mcp.NewServer(&mcp.Implementation{Name: "recipes", Version: "1.0.0"}, &mcp.ServerOptions{
+		Instructions: "Manage only the authenticated user's recipes. Pictures can be included directly in create_recipe and update_recipe.",
+		Capabilities: &mcp.ServerCapabilities{},
+	})
+	server.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method == "initialize" {
+				return nil, fmt.Errorf("legacy MCP initialization is unsupported; use protocol %s", protocolVersion)
+			}
+			result, err := next(ctx, method, req)
+			if err == nil && method == "server/discover" {
+				if discovery, ok := result.(*mcp.DiscoverResult); ok {
+					discovery.SupportedVersions = []string{protocolVersion}
+				}
+			}
+			return result, err
+		}
+	})
+	mcp.AddTool(server, &mcp.Tool{Name: "list_my_recipes", Description: "List the authenticated user's recipes with cursor pagination and optional localization."}, result.list)
+	mcp.AddTool(server, &mcp.Tool{Name: "get_my_recipe", Description: "Get one recipe owned by the authenticated user, optionally localized."}, result.get)
+	mcp.AddTool(server, &mcp.Tool{Name: "create_recipe", Description: "Create a complete recipe owned by the authenticated user, optionally including pictures in this call."}, result.create)
+	mcp.AddTool(server, &mcp.Tool{Name: "update_recipe", Description: "Patch a recipe owned by the authenticated user and optionally replace/reorder or append pictures."}, result.update)
+	stream := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{
+		Stateless: true, JSONResponse: true, MaxRequestBodyBytes: 90 << 20, PropagateRequestCancellation: true,
+	})
+	protected := auth.RequireBearerToken(oauth.TokenVerifier(), &auth.RequireBearerTokenOptions{ResourceMetadataURL: oauth.ResourceMetadataURL()})(stream)
+	result.handler = cors(protocolOnly(protected))
+	return result, nil
+}
+
+func (s *Server) Handler() http.Handler { return s.handler }
+
+func cors(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Mcp-Protocol-Version")
+		w.Header().Set("Access-Control-Expose-Headers", "WWW-Authenticate, Mcp-Protocol-Version")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func protocolOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if version := r.Header.Get("Mcp-Protocol-Version"); version != "" && version != protocolVersion {
+			http.Error(w, "unsupported MCP protocol version", http.StatusBadRequest)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func userWithScope(req *mcp.CallToolRequest, scope string) (string, error) {
+	var info *auth.TokenInfo
+	if req != nil && req.Extra != nil {
+		info = req.Extra.TokenInfo
+	}
+	if info == nil || info.UserID == "" {
+		return "", errors.New("authentication context is missing")
+	}
+	if !slices.Contains(info.Scopes, scope) {
+		return "", fmt.Errorf("the token does not grant %s", scope)
+	}
+	return info.UserID, nil
+}
+
+func decodeCursor(cursor string) (string, error) {
+	if cursor == "" {
+		return "", nil
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil || len(decoded) != 12 {
+		return "", errors.New("invalid cursor")
+	}
+	return primitive.ObjectID(decoded).Hex(), nil
+}
+
+func encodeCursor(cursor string) string {
+	id, err := primitive.ObjectIDFromHex(cursor)
+	if err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(id[:])
+}
+
+func (s *Server) recipeOutput(recipe models.Recipe) RecipeOutput {
+	output := RecipeOutput{
+		Title: recipe.Title, Description: recipe.Description, Quantity: recipe.Quantity, Kind: recipe.Kind,
+		PreparationTime: recipe.PreparationTime, CookingTime: recipe.CookingTime, RestingTime: recipe.RestingTime,
+		Ingredients: recipe.Ingredients, Steps: recipe.Steps, SourceLocale: recipe.SourceLocale, Locale: recipe.Locale,
+	}
+	if recipe.Id != nil {
+		output.ID = recipe.Id.Hex()
+	}
+	for _, id := range recipe.Pictures {
+		output.Pictures = append(output.Pictures, PictureOutput{ID: id, URL: s.pictureBase + id})
+	}
+	return output
+}
+
+func (s *Server) previewOutput(recipe models.RecipePreview) RecipeOutput {
+	result := RecipeOutput{
+		Title: recipe.Title, Description: recipe.Description, Quantity: recipe.Quantity, Kind: recipe.Kind,
+		PreparationTime: recipe.PreparationTime, CookingTime: recipe.CookingTime, RestingTime: recipe.RestingTime,
+		SourceLocale: recipe.SourceLocale, Locale: recipe.Locale,
+	}
+	if recipe.Id != nil {
+		result.ID = recipe.Id.Hex()
+	}
+	for _, id := range recipe.Pictures {
+		result.Pictures = append(result.Pictures, PictureOutput{ID: id, URL: s.pictureBase + id})
+	}
+	return result
+}
+
+func (s *Server) list(ctx context.Context, req *mcp.CallToolRequest, input ListInput) (*mcp.CallToolResult, ListOutput, error) {
+	userID, err := userWithScope(req, "recipes:read")
+	if err != nil {
+		return nil, ListOutput{}, err
+	}
+	cursor, err := decodeCursor(input.Cursor)
+	if err != nil {
+		return nil, ListOutput{}, err
+	}
+	items, total, next, err := s.recipes.ListForUser(ctx, userID, cursor, input.Limit, input.Locale)
+	if err != nil {
+		return nil, ListOutput{}, err
+	}
+	output := ListOutput{Total: total, NextCursor: encodeCursor(next)}
+	for _, item := range items {
+		output.Items = append(output.Items, s.previewOutput(item))
+	}
+	return nil, output, nil
+}
+
+func (s *Server) get(ctx context.Context, req *mcp.CallToolRequest, input GetInput) (*mcp.CallToolResult, RecipeOutput, error) {
+	userID, err := userWithScope(req, "recipes:read")
+	if err != nil {
+		return nil, RecipeOutput{}, err
+	}
+	recipe, err := s.recipes.GetForUser(ctx, input.RecipeID, userID, input.Locale)
+	if err != nil {
+		return nil, RecipeOutput{}, err
+	}
+	output := s.recipeOutput(recipe)
+	data, _ := json.Marshal(output)
+	content := make([]mcp.Content, 0, len(output.Pictures)+1)
+	content = append(content, &mcp.TextContent{Text: string(data)})
+	for _, picture := range output.Pictures {
+		content = append(content, &mcp.ResourceLink{URI: picture.URL, Name: picture.ID, Title: recipe.Title + " picture", MIMEType: mediaTypeFromID(picture.ID)})
+	}
+	return &mcp.CallToolResult{Content: content}, output, nil
+}
+
+func mediaTypeFromID(id string) string {
+	if strings.HasSuffix(strings.ToLower(id), ".png") {
+		return "image/png"
+	}
+	return "image/jpeg"
+}
+
+func uploads(inputs []PictureInput) ([]recipe_service.PictureUpload, error) {
+	result := make([]recipe_service.PictureUpload, 0, len(inputs))
+	for i, picture := range inputs {
+		data, err := base64.StdEncoding.DecodeString(picture.Data)
+		if err != nil {
+			return nil, fmt.Errorf("picture %d has invalid base64 data", i)
+		}
+		result = append(result, recipe_service.PictureUpload{Filename: picture.Filename, MediaType: picture.MediaType, Data: data})
+	}
+	return result, nil
+}
+
+func validateIdempotencyKey(key string) error {
+	length := len(strings.TrimSpace(key))
+	if length == 0 || length > 200 {
+		return errors.New("idempotency_key is required and must not exceed 200 bytes")
+	}
+	return nil
+}
+
+func (s *Server) create(ctx context.Context, req *mcp.CallToolRequest, input CreateInput) (*mcp.CallToolResult, RecipeOutput, error) {
+	userID, err := userWithScope(req, "recipes:write")
+	if err != nil {
+		return nil, RecipeOutput{}, err
+	}
+	if err := validateIdempotencyKey(input.IdempotencyKey); err != nil {
+		return nil, RecipeOutput{}, err
+	}
+	var output RecipeOutput
+	replayed, err := s.idempotency.Reserve(ctx, userID, "create_recipe", input.IdempotencyKey, input, &output)
+	if err != nil {
+		return nil, RecipeOutput{}, err
+	}
+	if replayed {
+		return nil, output, nil
+	}
+	pictures, err := uploads(input.Pictures)
+	if err != nil {
+		s.idempotency.Abandon(ctx, userID, "create_recipe", input.IdempotencyKey)
+		return nil, RecipeOutput{}, err
+	}
+	recipe, err := s.recipes.Create(ctx, userID, models.CreateRecipe{
+		Title: input.Title, Description: input.Description, Quantity: input.Quantity, Kind: input.Kind,
+		PreparationTime: input.PreparationTime, CookingTime: input.CookingTime, RestingTime: input.RestingTime,
+		Ingredients: input.Ingredients, Steps: input.Steps, SourceLocale: input.Locale,
+	}, pictures)
+	if err != nil {
+		s.idempotency.Abandon(ctx, userID, "create_recipe", input.IdempotencyKey)
+		return nil, RecipeOutput{}, err
+	}
+	output = s.recipeOutput(recipe)
+	if err := s.idempotency.Complete(ctx, userID, "create_recipe", input.IdempotencyKey, output); err != nil {
+		return nil, RecipeOutput{}, err
+	}
+	return nil, output, nil
+}
+
+func (s *Server) update(ctx context.Context, req *mcp.CallToolRequest, input UpdateInput) (*mcp.CallToolResult, RecipeOutput, error) {
+	userID, err := userWithScope(req, "recipes:write")
+	if err != nil {
+		return nil, RecipeOutput{}, err
+	}
+	if err := validateIdempotencyKey(input.IdempotencyKey); err != nil {
+		return nil, RecipeOutput{}, err
+	}
+	var output RecipeOutput
+	replayed, err := s.idempotency.Reserve(ctx, userID, "update_recipe", input.IdempotencyKey, input, &output)
+	if err != nil {
+		return nil, RecipeOutput{}, err
+	}
+	if replayed {
+		return nil, output, nil
+	}
+	canonical, err := s.recipes.GetForUser(ctx, input.RecipeID, userID, "")
+	if err != nil {
+		s.idempotency.Abandon(ctx, userID, "update_recipe", input.IdempotencyKey)
+		return nil, RecipeOutput{}, err
+	}
+	pictures, err := uploads(input.Pictures)
+	if err != nil {
+		s.idempotency.Abandon(ctx, userID, "update_recipe", input.IdempotencyKey)
+		return nil, RecipeOutput{}, err
+	}
+	updated, err := s.recipes.Update(ctx, canonical, models.UpdateRecipeRequest{
+		Title: input.Title, Description: input.Description, Quantity: input.Quantity, Kind: input.Kind,
+		PreparationTime: input.PreparationTime, CookingTime: input.CookingTime, RestingTime: input.RestingTime,
+		Ingredients: input.Ingredients, Steps: input.Steps, Locale: input.Locale, KeepPictureIDs: input.KeepPictureIDs,
+	}, pictures)
+	if err != nil {
+		s.idempotency.Abandon(ctx, userID, "update_recipe", input.IdempotencyKey)
+		return nil, RecipeOutput{}, err
+	}
+	output = s.recipeOutput(updated)
+	if err := s.idempotency.Complete(ctx, userID, "update_recipe", input.IdempotencyKey, output); err != nil {
+		return nil, RecipeOutput{}, err
+	}
+	return nil, output, nil
+}

@@ -1,218 +1,250 @@
 package handlers
 
 import (
+	"encoding/json"
 	"errors"
-	"github.com/labstack/echo/v4"
-	"golang.org/x/exp/slices"
+	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
-	mongo2 "recipes/internal/database/mongo"
-	"recipes/internal/images_manager"
+	"strings"
+
+	"github.com/labstack/echo/v4"
+
+	"recipes/internal/idempotency"
 	"recipes/internal/jwt_manager"
 	"recipes/internal/models"
+	"recipes/internal/recipe_service"
 	"recipes/internal/utils"
 )
 
-// @Summary Create Recipe
-// @Description Create a recipe with required information
-// @Tags Recipes
-// @accept json
-// @produce json
-// @Param request body models.CreateRecipe true "Recipe information"
-// @Success 200 {object} models.Recipe "OK"
-// @Failure 400 {object} models.ErrorResponse "Bad Request"
-// @Failure 401 {object} models.ErrorResponse "Invalid or expired jwt"
-// @Failure 500 {object} models.ErrorResponse "Failed to create the recipe"
-// @Security BearerAuth
-// @Router /recipes [post]
+const maxRecipeRequestBytes = 90 << 20
+
+func recipeServiceError(err error, c echo.Context) error {
+	switch {
+	case errors.Is(err, recipe_service.ErrInvalid):
+		return errorResponse(http.StatusUnprocessableEntity, err.Error(), nil, c)
+	case errors.Is(err, recipe_service.ErrNotFound):
+		return errorResponse(http.StatusNotFound, "Recipe not found", nil, c)
+	default:
+		return errorResponse(http.StatusInternalServerError, "Could not process recipe", err, c)
+	}
+}
+
+func idempotencyError(err error, c echo.Context) error {
+	if errors.Is(err, idempotency.ErrConflict) || errors.Is(err, idempotency.ErrPending) {
+		return errorResponse(http.StatusConflict, err.Error(), nil, c)
+	}
+	return errorResponse(http.StatusInternalServerError, "Could not process idempotent request", err, c)
+}
+
+func validateRESTIdempotencyKey(key string, c echo.Context) error {
+	if len(key) > 200 {
+		return errorResponse(http.StatusBadRequest, "Idempotency-Key must not exceed 200 bytes", nil, c)
+	}
+	return nil
+}
+
+func readPictureParts(files []*multipart.FileHeader) ([]recipe_service.PictureUpload, error) {
+	pictures := make([]recipe_service.PictureUpload, 0, len(files))
+	total := 0
+	for _, header := range files {
+		file, err := header.Open()
+		if err != nil {
+			return nil, err
+		}
+		data, readErr := io.ReadAll(io.LimitReader(file, maxRecipeRequestBytes+1))
+		closeErr := file.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+		total += len(data)
+		if total > maxRecipeRequestBytes {
+			return nil, errors.New("pictures exceed the request size limit")
+		}
+		pictures = append(pictures, recipe_service.PictureUpload{
+			Filename: header.Filename, MediaType: header.Header.Get(echo.HeaderContentType), Data: data,
+		})
+	}
+	return pictures, nil
+}
+
+func bindRecipeRequest(c echo.Context, target any) ([]recipe_service.PictureUpload, error) {
+	mediaType, _, err := mime.ParseMediaType(c.Request().Header.Get(echo.HeaderContentType))
+	if err != nil {
+		return nil, echo.NewHTTPError(http.StatusUnsupportedMediaType, "missing or invalid content type")
+	}
+	switch mediaType {
+	case echo.MIMEApplicationJSON:
+		decoder := json.NewDecoder(io.LimitReader(c.Request().Body, maxRecipeRequestBytes+1))
+		if err := decoder.Decode(target); err != nil {
+			return nil, err
+		}
+		if err := decoder.Decode(&struct{}{}); err != io.EOF {
+			return nil, errors.New("request body must contain one JSON object")
+		}
+		return nil, nil
+	case echo.MIMEMultipartForm:
+		if err := c.Request().ParseMultipartForm(maxRecipeRequestBytes); err != nil {
+			return nil, err
+		}
+		defer c.Request().MultipartForm.RemoveAll()
+		recipeJSON := c.FormValue("recipe")
+		if strings.TrimSpace(recipeJSON) == "" {
+			return nil, errors.New("multipart field recipe is required")
+		}
+		decoder := json.NewDecoder(strings.NewReader(recipeJSON))
+		if err := decoder.Decode(target); err != nil {
+			return nil, err
+		}
+		if err := decoder.Decode(&struct{}{}); err != io.EOF {
+			return nil, errors.New("recipe field must contain one JSON object")
+		}
+		return readPictureParts(c.Request().MultipartForm.File["pictures"])
+	default:
+		return nil, echo.NewHTTPError(http.StatusUnsupportedMediaType, "use application/json or multipart/form-data")
+	}
+}
+
+// CreateRecipe creates a complete recipe. Multipart requests contain a JSON
+// `recipe` field and zero or more `pictures` file fields.
 func (h *Handlers) CreateRecipe(c echo.Context) error {
 	var body models.CreateRecipe
-	jwt := jwt_manager.GetJwt[*models.AccessJwt](c)
-	err := c.Bind(&body)
+	pictures, err := bindRecipeRequest(c, &body)
 	if err != nil {
-		return errorResponse(http.StatusBadRequest, err.Error(), err, c)
-	}
-	recipe, err := h.db.CreateRecipe(jwt.UserId, &body)
-	if err != nil {
-		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
-	}
-	for _, k := range recipe.Pictures {
-		h.imgLru.Add(k, false)
-		h.imgLru.Remove(k)
-	}
-	go func() {
-		locale, err := h.t.GetRecipeLocale(recipe)
-		if err != nil {
-			return
+		var httpErr *echo.HTTPError
+		if errors.As(err, &httpErr) {
+			message, ok := httpErr.Message.(string)
+			if !ok {
+				message = http.StatusText(httpErr.Code)
+			}
+			return errorResponse(httpErr.Code, message, nil, c)
 		}
-		_, _ = h.db.AddLocaleRecipe(recipe, locale)
-	}()
+		return errorResponse(http.StatusBadRequest, err.Error(), nil, c)
+	}
+	jwt := jwt_manager.GetJwt[*models.AccessJwt](c)
+	key := strings.TrimSpace(c.Request().Header.Get("Idempotency-Key"))
+	if err := validateRESTIdempotencyKey(key, c); err != nil {
+		return err
+	}
+	if key != "" {
+		var replay models.Recipe
+		done, reserveErr := h.idem.Reserve(c.Request().Context(), jwt.UserId, "rest_create_recipe", key, struct {
+			Recipe   models.CreateRecipe
+			Pictures []recipe_service.PictureUpload
+		}{body, pictures}, &replay)
+		if reserveErr != nil {
+			return idempotencyError(reserveErr, c)
+		}
+		if done {
+			return c.JSON(http.StatusCreated, replay)
+		}
+	}
+	recipe, err := h.recipes.Create(c.Request().Context(), jwt.UserId, body, pictures)
+	if err != nil {
+		if key != "" {
+			h.idem.Abandon(c.Request().Context(), jwt.UserId, "rest_create_recipe", key)
+		}
+		return recipeServiceError(err, c)
+	}
+	if key != "" {
+		if err := h.idem.Complete(c.Request().Context(), jwt.UserId, "rest_create_recipe", key, recipe); err != nil {
+			return idempotencyError(err, c)
+		}
+	}
 	return c.JSON(http.StatusCreated, recipe)
 }
 
-// @Summary Get Recipes (preview)
-// @Description Get multiple recipe previews with query parameters
-// @Tags Recipes
-// @accept json
-// @produce json
-// @Param request query models.GetRecipesRequest false "Query params"
-// @Success 200 {object} models.GetRecipesResponse "OK"
-// @Failure 400 {object} models.ErrorResponse "Bad Request"
-// @Failure 401 {object} models.ErrorResponse "Invalid or expired jwt"
-// @Failure 500 {object} models.ErrorResponse "Failed to get the recipes"
-// @Security BearerAuth
-// @Router /recipes [get]
 func (h *Handlers) GetRecipes(c echo.Context) error {
-	var body models.GetRecipesRequest
-	// TODO send back recipes from all collections
-	err := utils.BindQuery(c, &body)
-	if err != nil {
-		return errorResponse(http.StatusBadRequest, err.Error(), err, c)
+	for _, name := range []string{"locale", "search_locale"} {
+		if len(c.QueryParams()[name]) > 1 {
+			return errorResponse(http.StatusBadRequest, name+" may be specified only once", nil, c)
+		}
 	}
-	// Limit default payload size
+	var body models.GetRecipesRequest
+	if err := utils.BindQuery(c, &body); err != nil {
+		return errorResponse(http.StatusBadRequest, err.Error(), nil, c)
+	}
 	if body.Limit == 0 {
 		body.Limit = 10
 	}
-	recipes, nbRecipes, err := h.db.GetRecipes(body)
+	if body.Limit < 0 || body.Limit > 100 || body.Offset < 0 {
+		return errorResponse(http.StatusBadRequest, "limit must be between 0 and 100 and offset must not be negative", nil, c)
+	}
+	recipes, count, err := h.recipes.List(c.Request().Context(), body)
 	if err != nil {
-		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
+		return recipeServiceError(err, c)
 	}
 	if recipes == nil {
 		recipes = []models.RecipePreview{}
 	}
-	return c.JSON(http.StatusOK, models.GetRecipesResponse{
-		Length: nbRecipes,
-		Items:  recipes,
-	})
+	return c.JSON(http.StatusOK, models.GetRecipesResponse{Length: count, Items: recipes})
 }
 
-// @Summary Get Recipe
-// @Description Get the full information of a recipe
-// @Tags Recipes
-// @accept json
-// @produce json
-// @Success 200 {object} models.Recipe "OK"
-// @Failure 400 {object} models.ErrorResponse "Bad Request"
-// @Failure 401 {object} models.ErrorResponse "Invalid or expired jwt"
-// @Failure 403 {object} models.ErrorResponse "Unauthorized"
-// @Failure 404 {object} models.ErrorResponse "Recipe not found"
-// @Security BearerAuth
-// @Router /recipes/:id [get]
 func (h *Handlers) GetRecipe(c echo.Context) error {
-	recipeId := c.Param("id")
-	locale := c.QueryParam("locale")
-	var recipe models.Recipe
-	var err error
-	if locale == "" {
-		recipe, err = h.db.GetRecipeById(recipeId)
-		if err != nil {
-			return errorResponse(http.StatusNotFound, err.Error(), err, c)
-		}
-	} else {
-		recipe, err = h.db.GetRecipeByIdLocale(recipeId, locale)
-		if err != nil && errors.Is(err, mongo2.NotFoundError) {
-			recipe, err = h.db.GetRecipeById(recipeId)
-			if err != nil {
-				return errorResponse(http.StatusNotFound, err.Error(), err, c)
-			}
-			recipe, err = h.t.TranslateRecipe(recipe, locale)
-			if err != nil {
-				return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
-			}
-			_, err := h.db.AddLocaleRecipe(recipe, locale)
-			if err != nil {
-				return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
-			}
-		} else if err != nil {
-			return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
-		}
+	if len(c.QueryParams()["locale"]) > 1 {
+		return errorResponse(http.StatusBadRequest, "locale may be specified only once", nil, c)
+	}
+	recipe, err := h.recipes.Get(c.Request().Context(), c.Param("id"), c.QueryParam("locale"))
+	if err != nil {
+		return recipeServiceError(err, c)
 	}
 	return c.JSON(http.StatusOK, recipe)
 }
 
-// @Summary Update Recipe
-// @Description Update a recipe with information
-// @Tags Recipes
-// @accept json
-// @produce json
-// @Param request body models.UpdateRecipeRequest true "Recipe information"
-// @Success 200 {object} models.Recipe "OK"
-// @Failure 400 {object} models.ErrorResponse "Bad Request"
-// @Failure 401 {object} models.ErrorResponse "Invalid or expired jwt"
-// @Failure 403 {object} models.ErrorResponse "Unauthorized"
-// @Failure 404 {object} models.ErrorResponse "Recipe not found"
-// @Failure 500 {object} models.ErrorResponse "Failed to update the recipe"
-// @Security BearerAuth
-// @Router /recipes/:id [patch]
 func (h *Handlers) UpdateRecipe(c echo.Context) error {
-	recipeId := c.Param("id")
 	var body models.UpdateRecipeRequest
-	err := c.Bind(&body)
+	pictures, err := bindRecipeRequest(c, &body)
 	if err != nil {
-		return errorResponse(http.StatusBadRequest, err.Error(), err, c)
-	}
-
-	if len(body.Pictures) > 0 {
-		recipe := c.Get("recipe").(models.Recipe)
-		addPictures := slices.Clone(body.Pictures)
-		slices.DeleteFunc(addPictures, func(s string) bool {
-			length := len(recipe.Pictures)
-			recipe.Pictures = slices.DeleteFunc(recipe.Pictures, func(s2 string) bool { return s2 == s })
-			return length != len(recipe.Pictures)
-		})
-
-		for _, deletePicture := range recipe.Pictures {
-			err := images_manager.Remove(h.cfg.RecipeImageDir, deletePicture)
-			if err != nil {
-				return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
-			}
+		var httpErr *echo.HTTPError
+		if errors.As(err, &httpErr) {
+			message, _ := httpErr.Message.(string)
+			return errorResponse(httpErr.Code, message, nil, c)
 		}
-		for _, addPicture := range addPictures {
-			h.imgLru.Add(addPicture, false)
-			h.imgLru.Remove(addPicture)
+		return errorResponse(http.StatusBadRequest, err.Error(), nil, c)
+	}
+	recipe := c.Get("recipe").(models.Recipe)
+	jwt := jwt_manager.GetJwt[*models.AccessJwt](c)
+	key := strings.TrimSpace(c.Request().Header.Get("Idempotency-Key"))
+	if err := validateRESTIdempotencyKey(key, c); err != nil {
+		return err
+	}
+	if key != "" {
+		var replay models.Recipe
+		done, reserveErr := h.idem.Reserve(c.Request().Context(), jwt.UserId, "rest_update_recipe", key, struct {
+			RecipeID string
+			Patch    models.UpdateRecipeRequest
+			Pictures []recipe_service.PictureUpload
+		}{c.Param("id"), body, pictures}, &replay)
+		if reserveErr != nil {
+			return idempotencyError(reserveErr, c)
+		}
+		if done {
+			return c.JSON(http.StatusOK, replay)
 		}
 	}
-
-	updated, err := h.db.UpdateRecipeById(recipeId, &body)
+	updated, err := h.recipes.Update(c.Request().Context(), recipe, body, pictures)
 	if err != nil {
-		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
-	}
-
-	go func() {
-		locale, err := h.t.GetRecipeLocale(updated)
-		if err != nil {
-			return
+		if key != "" {
+			h.idem.Abandon(c.Request().Context(), jwt.UserId, "rest_update_recipe", key)
 		}
-		_, _ = h.db.AddLocaleRecipe(updated, locale)
-	}()
+		return recipeServiceError(err, c)
+	}
+	if key != "" {
+		if err := h.idem.Complete(c.Request().Context(), jwt.UserId, "rest_update_recipe", key, updated); err != nil {
+			return idempotencyError(err, c)
+		}
+	}
 	return c.JSON(http.StatusOK, updated)
 }
 
-// @Summary Delete Recipe
-// @Description Delete a recipe
-// @Tags Recipes
-// @accept json
-// @produce json
-// @Success 200 {object} models.Recipe "OK"
-// @Failure 401 {object} models.ErrorResponse "Invalid or expired jwt"
-// @Failure 403 {object} models.ErrorResponse "Unauthorized"
-// @Failure 404 {object} models.ErrorResponse "Recipe not found"
-// @Failure 500 {object} models.ErrorResponse "Failed to delete the recipe"
-// @Security BearerAuth
-// @Router /recipes/:id [delete]
 func (h *Handlers) DeleteRecipe(c echo.Context) error {
-	recipeId := c.Param("id")
-	recipe, err := h.db.DeleteRecipeById(recipeId)
+	recipe, err := h.recipes.Delete(c.Request().Context(), c.Param("id"))
 	if err != nil {
-		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
-	}
-	for _, img := range recipe.Pictures {
-		tmpErr := images_manager.Remove(h.cfg.RecipeImageDir, img)
-		if tmpErr != nil {
-			err = tmpErr
-		}
-	}
-	if err != nil {
-		return errorResponse(http.StatusInternalServerError, err.Error(), err, c)
+		return recipeServiceError(err, c)
 	}
 	return c.JSON(http.StatusOK, recipe)
 }
@@ -220,12 +252,10 @@ func (h *Handlers) DeleteRecipe(c echo.Context) error {
 func (h *Handlers) RecipeAuthorMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		jwt := jwt_manager.GetJwt[*models.AccessJwt](c)
-		recipeId := c.Param("id")
-		recipe, err := h.db.GetRecipeById(recipeId)
+		recipe, err := h.db.GetRecipeById(c.Param("id"))
 		if err != nil {
-			return errorResponse(http.StatusNotFound, err.Error(), err, c)
+			return errorResponse(http.StatusNotFound, "Recipe not found", nil, c)
 		}
-
 		c.Set("recipe", recipe)
 		if recipe.Author.Id.Hex() == jwt.UserId || jwt.Admin {
 			return next(c)

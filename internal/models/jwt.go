@@ -16,18 +16,21 @@ type RefreshResponse struct {
 }
 
 type AccessJwt struct {
-	UserId string `json:"id"`
-	Admin  bool   `json:"admin"`
+	UserId  string `json:"id"`
+	Admin   bool   `json:"admin"`
+	Purpose string `json:"purpose"`
 	jwt.RegisteredClaims
 }
 
 type RefreshJwt struct {
-	UserId string `json:"id"`
-	Admin  bool   `json:"admin"`
+	UserId  string `json:"id"`
+	Admin   bool   `json:"admin"`
+	Purpose string `json:"purpose"`
 	jwt.RegisteredClaims
 }
 
 type ResetJwt struct {
-	UserId string `json:"id"`
+	UserId  string `json:"id"`
+	Purpose string `json:"purpose"`
 	jwt.RegisteredClaims
 }

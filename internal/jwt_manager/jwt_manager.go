@@ -18,6 +18,12 @@ type JwtManager struct {
 	ResetExpiration   time.Duration
 }
 
+const (
+	PurposeAccess  = "access"
+	PurposeRefresh = "refresh"
+	PurposeReset   = "reset"
+)
+
 func NewJwtClaims[T any](_ echo.Context) jwt.Claims {
 	return any(new(T)).(jwt.Claims)
 }
@@ -29,15 +35,24 @@ func GetJwt[T any](c echo.Context) T {
 	return claims
 }
 
-func DecodeJWT[T any](secret, tokenString string) (rt T, rerr error) {
+func DecodeJWT[T any](secret, tokenString string, expectedPurpose ...string) (rt T, rerr error) {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		if token.Method != jwt.SigningMethodHS256 {
+			return nil, fmt.Errorf("unexpected token signing method")
+		}
 		return []byte(secret), nil
-	})
+	}, jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}), jwt.WithExpirationRequired())
 	if err != nil {
 		return rt, err
 	}
 
 	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
+		if len(expectedPurpose) > 0 {
+			purpose, ok := claims["purpose"].(string)
+			if !ok || purpose != expectedPurpose[0] {
+				return rt, fmt.Errorf("invalid token purpose")
+			}
+		}
 		bytes, err := json.Marshal(claims)
 		if err != nil {
 			return rt, err
@@ -53,8 +68,9 @@ func DecodeJWT[T any](secret, tokenString string) (rt T, rerr error) {
 
 func (m *JwtManager) GenerateAccessJwt(id string, admin bool, validity time.Duration) (*models.AccessJwt, string, error) {
 	claims := &models.AccessJwt{
-		UserId: id,
-		Admin:  admin,
+		UserId:  id,
+		Admin:   admin,
+		Purpose: PurposeAccess,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(validity)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -68,8 +84,9 @@ func (m *JwtManager) GenerateAccessJwt(id string, admin bool, validity time.Dura
 
 func (m *JwtManager) GenerateRefreshJwt(id string, admin bool, validity time.Duration) (*models.RefreshJwt, string, error) {
 	claims := &models.RefreshJwt{
-		UserId: id,
-		Admin:  admin,
+		UserId:  id,
+		Admin:   admin,
+		Purpose: PurposeRefresh,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(validity)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -83,7 +100,8 @@ func (m *JwtManager) GenerateRefreshJwt(id string, admin bool, validity time.Dur
 
 func (m *JwtManager) GenerateResetJwt(id string, validity time.Duration) (*models.ResetJwt, string, error) {
 	claims := &models.ResetJwt{
-		UserId: id,
+		UserId:  id,
+		Purpose: PurposeReset,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(validity)),
 		},
