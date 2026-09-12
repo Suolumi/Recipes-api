@@ -12,14 +12,14 @@ The server implements the current `2026-07-28` MCP protocol only. It uses the of
 
 ## Getting a token
 
-The friend registers on the recipes website like any other user, then, while logged in, calls the API once:
+While logged in to the recipes website, call the API once:
 
 ```text
 POST /api/v1/mcp/token        (Authorization: Bearer <website access token>)
 → 200 { "token": "<mcp token>" }
 ```
 
-They paste `token` into their local agent's MCP configuration as the bearer token for `<public-url>`. The token is a signed JWT — nothing is stored server-side — and is valid for `RECIPES_MCP_TOKENEXPIRATION` (default one year). Minting again returns a fresh token; both remain valid until expiry or revocation.
+Paste `token` into the local agent's MCP configuration as the bearer token for `<public-url>`. The token is a signed JWT — nothing is stored server-side — and is valid for `RECIPES_MCP_TOKENEXPIRATION` (default one year). Minting again returns a fresh token; both remain valid until expiry or revocation.
 
 To cut off access:
 
@@ -53,12 +53,12 @@ Token validation is stateless apart from checking that the user still exists and
 
 - `list_my_recipes`: accepts optional `cursor`, `limit` (default 20, maximum 100), and one BCP 47 `locale`. It returns the total, items, and an opaque next cursor.
 - `get_my_recipe`: accepts `recipe_id` and optional `locale`. Pictures contain both their stored ID and public URL, and are also returned as MCP resource links.
-- `create_recipe`: requires a complete recipe, and optional `pictures` in the same call.
-- `update_recipe`: requires `recipe_id`; all other recipe fields are true patch fields. Optional `keep_picture_ids` gives the ordered existing pictures to retain. New pictures are appended in request order.
+- `create_recipe`: requires a complete recipe. Pictures cannot be uploaded through this tool; attach them via the website.
+- `update_recipe`: requires `recipe_id`; all other recipe fields are true patch fields. Optional `keep_picture_ids` gives the ordered existing pictures to retain, or removes them all with an empty list. New pictures cannot be uploaded through this tool; attach them via the website.
 
 There is intentionally no MCP delete tool. Recipe deletion remains available through the website/REST API.
 
-Each MCP picture is an object with `filename`, `media_type`, and standard base64 `data`. JPEG and PNG are accepted. The decoded total across a call is limited to 64 MiB; each image is limited to 40 megapixels and 16,384 pixels on either axis. Content, declared media type, and filename extension must agree. Images are auto-oriented and re-encoded in their original format, which strips EXIF/GPS metadata. Zero pictures is valid.
+MCP tool calls carry structured JSON, which makes uploading binary picture data through them impractical (it has to be inlined as base64), so picture attachment is REST/website-only — see below.
 
 Recipes must have a nonblank title, quantity of at least one, a supported kind, nonnegative times, at least one named ingredient, and at least one step with a description. Incomplete recipes are rejected rather than saved as drafts.
 
@@ -69,3 +69,5 @@ Recipes must have a nonblank title, quantity of at least one, a supported kind, 
 ## REST picture creation/update
 
 REST recipe creation and patch now accept either ordinary `application/json` (no newly uploaded pictures) or `multipart/form-data`. Multipart requests contain a `recipe` field with the JSON recipe/patch and zero or more repeated `pictures` file fields. On patch, omitted `keep_picture_ids` leaves existing pictures unchanged, while an empty array removes all of them. The old standalone recipe-picture upload/delete endpoints have been removed; public picture GET remains at `/api/v1/recipe-pictures/{id}`.
+
+Each uploaded picture is validated the same way regardless of caller: JPEG and PNG are accepted, the decoded total across a request is limited to `RECIPES_MCP_MAXDECODEDPICTUREBYTES` (default 64 MiB, shared with the recipe service), each image is limited to 40 megapixels and 16,384 pixels on either axis, and content/declared media type/filename extension must all agree. Images are auto-oriented and re-encoded in their original format, which strips EXIF/GPS metadata. Zero pictures is valid.

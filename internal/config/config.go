@@ -44,15 +44,10 @@ type RuntimeConfig struct {
 	RecipeImageDir string
 }
 
-type LruConfig struct {
-	RecipeImageTimeout time.Duration
-}
-
 type Config struct {
 	Db         *DatabaseConfig
 	Jwt        *JwtConfig
 	Cfg        *RuntimeConfig
-	Lru        *LruConfig
 	Translator *translator.TranslatorConfig
 	Mails      *mail_sender.MailSenderConfig
 	MCP        *MCPConfig
@@ -114,9 +109,6 @@ func NewConfig(prefix ...string) (*Config, error) {
 			Email:    "",
 			Password: "",
 			MailsDir: "assets/mails",
-		},
-		Lru: &LruConfig{
-			RecipeImageTimeout: time.Hour,
 		},
 		Translator: &translator.TranslatorConfig{
 			ApiKey:  "",

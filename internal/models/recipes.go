@@ -1,6 +1,8 @@
 package models
 
 import (
+	"encoding/json"
+
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
@@ -110,6 +112,19 @@ type Recipe struct {
 	SourceHash      string              `bson:"source_hash,omitempty" json:"-"`
 }
 
+// MarshalJSON ensures a recipe with no pictures serializes `pictures` as `[]`
+// rather than `null`: a nil slice is a valid, common state (see docs/mcp.md,
+// "Zero pictures is valid"), but clients that assume an array (e.g. the
+// website's `formData.pictures.length` check) crash on `null`.
+func (r Recipe) MarshalJSON() ([]byte, error) {
+	type alias Recipe
+	a := alias(r)
+	if a.Pictures == nil {
+		a.Pictures = []string{}
+	}
+	return json.Marshal(a)
+}
+
 func (r *Recipe) ToRecipeDB() RecipeDB {
 	return RecipeDB{
 		Author:          r.Author.Id,
@@ -145,10 +160,21 @@ type RecipePreview struct {
 	Locale          string              `bson:"locale,omitempty" json:"locale,omitempty"`
 }
 
+// MarshalJSON ensures `pictures` serializes as `[]` rather than `null`; see
+// Recipe.MarshalJSON for why.
+func (r RecipePreview) MarshalJSON() ([]byte, error) {
+	type alias RecipePreview
+	a := alias(r)
+	if a.Pictures == nil {
+		a.Pictures = []string{}
+	}
+	return json.Marshal(a)
+}
+
 type Ingredient struct {
-	Name     string  `bson:"name,omitempty" json:"name"`
-	Quantity float64 `bson:"quantity,omitempty" json:"quantity"`
-	Unit     string  `bson:"unit,omitempty" json:"unit"`
+	Name     string  `bson:"name,omitempty" json:"name" jsonschema:"Ingredient name, e.g. 'Egg' or 'Thyme'"`
+	Quantity float64 `bson:"quantity,omitempty" json:"quantity" jsonschema:"Numeric amount, e.g. 3 or 0.5"`
+	Unit     string  `bson:"unit,omitempty" json:"unit" jsonschema:"Optional unit shown between quantity and name. Leave empty for a bare count, e.g. quantity 3 + name 'Egg' renders as '3 Egg'. Set it for a unit of measure or descriptor, e.g. quantity 3 + unit 'leaves' + name 'Thyme' renders as '3 leaves - Thyme'"`
 }
 
 type Step struct {

@@ -22,12 +22,6 @@ import (
 
 const protocolVersion = "2026-07-28"
 
-type PictureInput struct {
-	Filename  string `json:"filename" jsonschema:"Original filename including .jpg, .jpeg, or .png"`
-	MediaType string `json:"media_type" jsonschema:"Declared media type: image/jpeg or image/png"`
-	Data      string `json:"data" jsonschema:"Base64-encoded image bytes"`
-}
-
 type ListInput struct {
 	Cursor string `json:"cursor,omitempty" jsonschema:"Opaque cursor returned by a previous call"`
 	Limit  int    `json:"limit,omitempty" jsonschema:"Page size from 1 to 100; defaults to 20"`
@@ -50,7 +44,6 @@ type CreateInput struct {
 	Ingredients     []models.Ingredient `json:"ingredients"`
 	Steps           []models.Step       `json:"steps"`
 	Locale          string              `json:"locale,omitempty" jsonschema:"BCP 47 locale of the canonical recipe; detected when omitted"`
-	Pictures        []PictureInput      `json:"pictures,omitempty" jsonschema:"Optional JPEG or PNG pictures uploaded as part of creation"`
 }
 
 type UpdateInput struct {
@@ -66,7 +59,6 @@ type UpdateInput struct {
 	Steps           *[]models.Step       `json:"steps,omitempty"`
 	Locale          *string              `json:"locale,omitempty" jsonschema:"BCP 47 locale of the canonical recipe"`
 	KeepPictureIDs  *[]string            `json:"keep_picture_ids,omitempty" jsonschema:"Ordered existing picture IDs to retain; omit to keep all, or pass an empty list to remove all"`
-	Pictures        []PictureInput       `json:"pictures,omitempty" jsonschema:"New JPEG or PNG pictures appended in request order"`
 }
 
 type PictureOutput struct {
@@ -109,7 +101,7 @@ func New(cfg *config.MCPConfig, recipes *recipe_service.Service, verifier auth.T
 	}
 	result := &Server{recipes: recipes, pictureBase: parsed.Scheme + "://" + parsed.Host + "/api/v1/recipe-pictures/"}
 	server := mcp.NewServer(&mcp.Implementation{Name: "recipes", Version: "1.0.0"}, &mcp.ServerOptions{
-		Instructions: "Manage only the authenticated user's recipes. Pictures can be included directly in create_recipe and update_recipe.",
+		Instructions: "Manage only the authenticated user's recipes. Pictures cannot be uploaded through this MCP server; attach photos via the website.",
 		Capabilities: &mcp.ServerCapabilities{},
 	})
 	server.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
@@ -128,8 +120,8 @@ func New(cfg *config.MCPConfig, recipes *recipe_service.Service, verifier auth.T
 	})
 	mcp.AddTool(server, &mcp.Tool{Name: "list_my_recipes", Description: "List the authenticated user's recipes with cursor pagination and optional localization."}, result.list)
 	mcp.AddTool(server, &mcp.Tool{Name: "get_my_recipe", Description: "Get one recipe owned by the authenticated user, optionally localized."}, result.get)
-	mcp.AddTool(server, &mcp.Tool{Name: "create_recipe", Description: "Create a complete recipe owned by the authenticated user, optionally including pictures in this call."}, result.create)
-	mcp.AddTool(server, &mcp.Tool{Name: "update_recipe", Description: "Patch a recipe owned by the authenticated user and optionally replace/reorder or append pictures."}, result.update)
+	mcp.AddTool(server, &mcp.Tool{Name: "create_recipe", Description: "Create a complete recipe owned by the authenticated user. Pictures are not supported here; attach them via the website."}, result.create)
+	mcp.AddTool(server, &mcp.Tool{Name: "update_recipe", Description: "Patch a recipe owned by the authenticated user and optionally reorder or remove existing pictures via keep_picture_ids. New pictures cannot be uploaded here; attach them via the website."}, result.update)
 	stream := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{
 		Stateless: true, JSONResponse: true, MaxRequestBodyBytes: 90 << 20, PropagateRequestCancellation: true,
 	})
@@ -202,6 +194,7 @@ func (s *Server) recipeOutput(recipe models.Recipe) RecipeOutput {
 		Title: recipe.Title, Description: recipe.Description, Quantity: recipe.Quantity, Kind: recipe.Kind,
 		PreparationTime: recipe.PreparationTime, CookingTime: recipe.CookingTime, RestingTime: recipe.RestingTime,
 		Ingredients: recipe.Ingredients, Steps: recipe.Steps, SourceLocale: recipe.SourceLocale, Locale: recipe.Locale,
+		Pictures: []PictureOutput{},
 	}
 	if recipe.Id != nil {
 		output.ID = recipe.Id.Hex()
@@ -217,6 +210,7 @@ func (s *Server) previewOutput(recipe models.RecipePreview) RecipeOutput {
 		Title: recipe.Title, Description: recipe.Description, Quantity: recipe.Quantity, Kind: recipe.Kind,
 		PreparationTime: recipe.PreparationTime, CookingTime: recipe.CookingTime, RestingTime: recipe.RestingTime,
 		SourceLocale: recipe.SourceLocale, Locale: recipe.Locale,
+		Pictures: []PictureOutput{},
 	}
 	if recipe.Id != nil {
 		result.ID = recipe.Id.Hex()
@@ -273,24 +267,8 @@ func mediaTypeFromID(id string) string {
 	return "image/jpeg"
 }
 
-func uploads(inputs []PictureInput) ([]recipe_service.PictureUpload, error) {
-	result := make([]recipe_service.PictureUpload, 0, len(inputs))
-	for i, picture := range inputs {
-		data, err := base64.StdEncoding.DecodeString(picture.Data)
-		if err != nil {
-			return nil, fmt.Errorf("picture %d has invalid base64 data", i)
-		}
-		result = append(result, recipe_service.PictureUpload{Filename: picture.Filename, MediaType: picture.MediaType, Data: data})
-	}
-	return result, nil
-}
-
 func (s *Server) create(ctx context.Context, req *mcp.CallToolRequest, input CreateInput) (*mcp.CallToolResult, RecipeOutput, error) {
 	userID, err := userWithScope(req, "recipes:write")
-	if err != nil {
-		return nil, RecipeOutput{}, err
-	}
-	pictures, err := uploads(input.Pictures)
 	if err != nil {
 		return nil, RecipeOutput{}, err
 	}
@@ -298,7 +276,7 @@ func (s *Server) create(ctx context.Context, req *mcp.CallToolRequest, input Cre
 		Title: input.Title, Description: input.Description, Quantity: input.Quantity, Kind: input.Kind,
 		PreparationTime: input.PreparationTime, CookingTime: input.CookingTime, RestingTime: input.RestingTime,
 		Ingredients: input.Ingredients, Steps: input.Steps, SourceLocale: input.Locale,
-	}, pictures)
+	}, nil)
 	if err != nil {
 		return nil, RecipeOutput{}, err
 	}
@@ -314,15 +292,11 @@ func (s *Server) update(ctx context.Context, req *mcp.CallToolRequest, input Upd
 	if err != nil {
 		return nil, RecipeOutput{}, err
 	}
-	pictures, err := uploads(input.Pictures)
-	if err != nil {
-		return nil, RecipeOutput{}, err
-	}
 	updated, err := s.recipes.Update(ctx, canonical, models.UpdateRecipeRequest{
 		Title: input.Title, Description: input.Description, Quantity: input.Quantity, Kind: input.Kind,
 		PreparationTime: input.PreparationTime, CookingTime: input.CookingTime, RestingTime: input.RestingTime,
 		Ingredients: input.Ingredients, Steps: input.Steps, Locale: input.Locale, KeepPictureIDs: input.KeepPictureIDs,
-	}, pictures)
+	}, nil)
 	if err != nil {
 		return nil, RecipeOutput{}, err
 	}
