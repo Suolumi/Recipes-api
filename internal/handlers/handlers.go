@@ -135,6 +135,12 @@ func (h *Handlers) RegisterEndpoints() {
 			return nil
 		},
 	}))
+	h.e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
+		AllowOrigins:  []string{h.cfg.WebappUrl},
+		AllowHeaders:  []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization},
+		AllowMethods:  []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions},
+		ExposeHeaders: []string{echo.HeaderXRequestID},
+	}))
 
 	adminMiddleware := func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
@@ -147,13 +153,6 @@ func (h *Handlers) RegisterEndpoints() {
 	}
 
 	unprotectedRouter := h.e.Group("/api/v1")
-	restCORS := middleware.CORSWithConfig(middleware.CORSConfig{
-		AllowOrigins:  []string{h.cfg.WebappUrl},
-		AllowHeaders:  []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization},
-		AllowMethods:  []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions},
-		ExposeHeaders: []string{echo.HeaderXRequestID},
-	})
-	unprotectedRouter.Use(restCORS)
 	accessClaims := func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			claims, ok := c.Get("jwt").(*jwt.Token)
@@ -168,7 +167,6 @@ func (h *Handlers) RegisterEndpoints() {
 		}
 	}
 	protectedRouter := h.e.Group("/api/v1",
-		restCORS,
 		h.QueryJwt,
 		echojwt.WithConfig(echojwt.Config{
 			NewClaimsFunc: jwt_manager.NewJwtClaims[models.TokenClaims],
