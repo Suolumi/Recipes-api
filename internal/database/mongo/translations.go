@@ -41,8 +41,11 @@ func translationFromRecipe(recipe models.Recipe, locale string) (recipeTranslati
 	if recipe.Author != nil {
 		author = recipe.Author.Id
 	}
+	// ID is intentionally left zero: bson:"_id,omitempty" drops it from the
+	// document so ReplaceOne keeps the matched translation's _id on replace and
+	// lets MongoDB generate one on insert. Carrying a fresh _id here makes the
+	// upsert fail on replace because _id is immutable.
 	return recipeTranslationDocument{
-		ID:              primitive.NewObjectID(),
 		RecipeID:        *recipe.Id,
 		Author:          author,
 		Title:           recipe.Title,
@@ -120,7 +123,10 @@ func (c *Client) GetRecipeByIdLocale(id string, locale string) (models.Recipe, e
 	return c.getTranslatedRecipe(context.Background(), recipeID, locale)
 }
 
-func (c *Client) GetLocaleRecipesByIDs(ctx context.Context, ids []string, locale string) ([]models.Recipe, error) {
+// GetTranslationsByRecipeIDs fetches the stored translation for each given
+// recipe in one query, keyed by recipe id hex. Recipes without a translation
+// for the locale are simply absent from the map.
+func (c *Client) GetTranslationsByRecipeIDs(ctx context.Context, ids []string, locale string) (map[string]models.Recipe, error) {
 	objectIDs := make([]primitive.ObjectID, 0, len(ids))
 	for _, id := range ids {
 		objectID, err := primitive.ObjectIDFromHex(id)
@@ -129,8 +135,9 @@ func (c *Client) GetLocaleRecipesByIDs(ctx context.Context, ids []string, locale
 		}
 		objectIDs = append(objectIDs, objectID)
 	}
+	result := make(map[string]models.Recipe, len(objectIDs))
 	if len(objectIDs) == 0 {
-		return []models.Recipe{}, nil
+		return result, nil
 	}
 	cursor, err := c.db.Collection(translationsCollection).Aggregate(ctx, translationPipeline(bson.D{
 		{Key: "recipe_id", Value: bson.D{{Key: "$in", Value: objectIDs}}},
@@ -143,5 +150,10 @@ func (c *Client) GetLocaleRecipesByIDs(ctx context.Context, ids []string, locale
 	if err != nil {
 		return nil, err
 	}
-	return recipes, nil
+	for _, recipe := range recipes {
+		if recipe.Id != nil {
+			result[recipe.Id.Hex()] = recipe
+		}
+	}
+	return result, nil
 }

@@ -28,7 +28,7 @@ func (h *Handlers) GetUser(c echo.Context) error {
 	userId := c.Param("id")
 	admin := false
 	if c.Get("jwt") != nil {
-		jwt := jwt_manager.GetJwt[*models.AccessJwt](c)
+		jwt := jwt_manager.GetJwt[*models.TokenClaims](c)
 		admin = jwt.Admin
 
 		if jwt.UserId == userId {
@@ -81,7 +81,7 @@ func (h *Handlers) GetUsers(c echo.Context) error {
 
 	admin := false
 	if c.Get("jwt") != nil {
-		jwt := jwt_manager.GetJwt[*models.AccessJwt](c)
+		jwt := jwt_manager.GetJwt[*models.TokenClaims](c)
 		admin = jwt.Admin
 	}
 	if admin {
@@ -117,7 +117,7 @@ func (h *Handlers) GetUsers(c echo.Context) error {
 // @Router /users/{id} [patch]
 func (h *Handlers) UpdateUser(c echo.Context) error {
 	userId := c.Param("id")
-	jwt := jwt_manager.GetJwt[*models.AccessJwt](c)
+	jwt := jwt_manager.GetJwt[*models.TokenClaims](c)
 	var userData models.UserDB
 
 	err := c.Bind(&userData)

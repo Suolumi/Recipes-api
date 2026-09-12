@@ -16,9 +16,6 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"recipes/internal/config"
-	"recipes/internal/database"
-	"recipes/internal/idempotency"
-	"recipes/internal/mcp_auth"
 	"recipes/internal/models"
 	"recipes/internal/recipe_service"
 )
@@ -43,7 +40,6 @@ type GetInput struct {
 }
 
 type CreateInput struct {
-	IdempotencyKey  string              `json:"idempotency_key" jsonschema:"Unique retry key retained for 24 hours"`
 	Title           string              `json:"title"`
 	Description     string              `json:"description,omitempty"`
 	Quantity        int                 `json:"quantity"`
@@ -58,7 +54,6 @@ type CreateInput struct {
 }
 
 type UpdateInput struct {
-	IdempotencyKey  string               `json:"idempotency_key" jsonschema:"Unique retry key retained for 24 hours"`
 	RecipeID        string               `json:"recipe_id"`
 	Title           *string              `json:"title,omitempty"`
 	Description     *string              `json:"description,omitempty"`
@@ -104,20 +99,15 @@ type ListOutput struct {
 type Server struct {
 	handler     http.Handler
 	recipes     *recipe_service.Service
-	idempotency *idempotency.Store
 	pictureBase string
 }
 
-func New(ctx context.Context, cfg *config.MCPConfig, db database.Database, recipes *recipe_service.Service, oauth *mcp_auth.Server) (*Server, error) {
-	store, err := idempotency.New(ctx, db.RawDatabase(), cfg.IdempotencyTTL)
-	if err != nil {
-		return nil, err
-	}
+func New(cfg *config.MCPConfig, recipes *recipe_service.Service, verifier auth.TokenVerifier) (*Server, error) {
 	parsed, err := url.Parse(cfg.PublicURL)
 	if err != nil {
 		return nil, err
 	}
-	result := &Server{recipes: recipes, idempotency: store, pictureBase: parsed.Scheme + "://" + parsed.Host + "/api/v1/recipe-pictures/"}
+	result := &Server{recipes: recipes, pictureBase: parsed.Scheme + "://" + parsed.Host + "/api/v1/recipe-pictures/"}
 	server := mcp.NewServer(&mcp.Implementation{Name: "recipes", Version: "1.0.0"}, &mcp.ServerOptions{
 		Instructions: "Manage only the authenticated user's recipes. Pictures can be included directly in create_recipe and update_recipe.",
 		Capabilities: &mcp.ServerCapabilities{},
@@ -143,7 +133,7 @@ func New(ctx context.Context, cfg *config.MCPConfig, db database.Database, recip
 	stream := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{
 		Stateless: true, JSONResponse: true, MaxRequestBodyBytes: 90 << 20, PropagateRequestCancellation: true,
 	})
-	protected := auth.RequireBearerToken(oauth.TokenVerifier(), &auth.RequireBearerTokenOptions{ResourceMetadataURL: oauth.ResourceMetadataURL()})(stream)
+	protected := auth.RequireBearerToken(verifier, &auth.RequireBearerTokenOptions{})(stream)
 	result.handler = cors(protocolOnly(protected))
 	return result, nil
 }
@@ -295,33 +285,13 @@ func uploads(inputs []PictureInput) ([]recipe_service.PictureUpload, error) {
 	return result, nil
 }
 
-func validateIdempotencyKey(key string) error {
-	length := len(strings.TrimSpace(key))
-	if length == 0 || length > 200 {
-		return errors.New("idempotency_key is required and must not exceed 200 bytes")
-	}
-	return nil
-}
-
 func (s *Server) create(ctx context.Context, req *mcp.CallToolRequest, input CreateInput) (*mcp.CallToolResult, RecipeOutput, error) {
 	userID, err := userWithScope(req, "recipes:write")
 	if err != nil {
 		return nil, RecipeOutput{}, err
 	}
-	if err := validateIdempotencyKey(input.IdempotencyKey); err != nil {
-		return nil, RecipeOutput{}, err
-	}
-	var output RecipeOutput
-	replayed, err := s.idempotency.Reserve(ctx, userID, "create_recipe", input.IdempotencyKey, input, &output)
-	if err != nil {
-		return nil, RecipeOutput{}, err
-	}
-	if replayed {
-		return nil, output, nil
-	}
 	pictures, err := uploads(input.Pictures)
 	if err != nil {
-		s.idempotency.Abandon(ctx, userID, "create_recipe", input.IdempotencyKey)
 		return nil, RecipeOutput{}, err
 	}
 	recipe, err := s.recipes.Create(ctx, userID, models.CreateRecipe{
@@ -330,14 +300,9 @@ func (s *Server) create(ctx context.Context, req *mcp.CallToolRequest, input Cre
 		Ingredients: input.Ingredients, Steps: input.Steps, SourceLocale: input.Locale,
 	}, pictures)
 	if err != nil {
-		s.idempotency.Abandon(ctx, userID, "create_recipe", input.IdempotencyKey)
 		return nil, RecipeOutput{}, err
 	}
-	output = s.recipeOutput(recipe)
-	if err := s.idempotency.Complete(ctx, userID, "create_recipe", input.IdempotencyKey, output); err != nil {
-		return nil, RecipeOutput{}, err
-	}
-	return nil, output, nil
+	return nil, s.recipeOutput(recipe), nil
 }
 
 func (s *Server) update(ctx context.Context, req *mcp.CallToolRequest, input UpdateInput) (*mcp.CallToolResult, RecipeOutput, error) {
@@ -345,25 +310,12 @@ func (s *Server) update(ctx context.Context, req *mcp.CallToolRequest, input Upd
 	if err != nil {
 		return nil, RecipeOutput{}, err
 	}
-	if err := validateIdempotencyKey(input.IdempotencyKey); err != nil {
-		return nil, RecipeOutput{}, err
-	}
-	var output RecipeOutput
-	replayed, err := s.idempotency.Reserve(ctx, userID, "update_recipe", input.IdempotencyKey, input, &output)
-	if err != nil {
-		return nil, RecipeOutput{}, err
-	}
-	if replayed {
-		return nil, output, nil
-	}
 	canonical, err := s.recipes.GetForUser(ctx, input.RecipeID, userID, "")
 	if err != nil {
-		s.idempotency.Abandon(ctx, userID, "update_recipe", input.IdempotencyKey)
 		return nil, RecipeOutput{}, err
 	}
 	pictures, err := uploads(input.Pictures)
 	if err != nil {
-		s.idempotency.Abandon(ctx, userID, "update_recipe", input.IdempotencyKey)
 		return nil, RecipeOutput{}, err
 	}
 	updated, err := s.recipes.Update(ctx, canonical, models.UpdateRecipeRequest{
@@ -372,12 +324,7 @@ func (s *Server) update(ctx context.Context, req *mcp.CallToolRequest, input Upd
 		Ingredients: input.Ingredients, Steps: input.Steps, Locale: input.Locale, KeepPictureIDs: input.KeepPictureIDs,
 	}, pictures)
 	if err != nil {
-		s.idempotency.Abandon(ctx, userID, "update_recipe", input.IdempotencyKey)
 		return nil, RecipeOutput{}, err
 	}
-	output = s.recipeOutput(updated)
-	if err := s.idempotency.Complete(ctx, userID, "update_recipe", input.IdempotencyKey, output); err != nil {
-		return nil, RecipeOutput{}, err
-	}
-	return nil, output, nil
+	return nil, s.recipeOutput(updated), nil
 }

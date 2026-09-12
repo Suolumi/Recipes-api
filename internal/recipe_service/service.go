@@ -7,19 +7,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"golang.org/x/text/language"
 
-	"recipes/internal/database"
 	mongorepo "recipes/internal/database/mongo"
 	"recipes/internal/images_manager"
 	"recipes/internal/models"
-	"recipes/internal/translator"
+	"recipes/internal/utils"
 )
 
 const (
@@ -28,7 +26,17 @@ const (
 	maxIngredientFieldLength = 200
 	maxStepTitleLength       = 200
 	maxStepDescriptionLength = 5000
+
+	// translateConcurrency caps how many recipes are being translated at once
+	// across all detached write-path and backfill work.
+	translateConcurrency = 4
+
+	backfillPageSize = 100
 )
+
+// translateBackoffs is the wait before each attempt when translating one locale;
+// its length is the attempt count.
+var translateBackoffs = []time.Duration{time.Second, 4 * time.Second, 10 * time.Second}
 
 var (
 	ErrInvalid  = errors.New("invalid recipe")
@@ -41,29 +49,54 @@ type PictureUpload struct {
 	Data      []byte `json:"data"`
 }
 
-type Service struct {
-	db              database.Database
-	translator      *translator.Translator
-	imageDir        string
-	stagingDir      string
-	maxPictureBytes int
+// Store is the slice of database.Database the service needs; database.Database
+// satisfies it. Keeping it narrow lets tests fake the parts under exercise.
+type Store interface {
+	CreateRecipe(authorID string, infos *models.CreateRecipe) (models.Recipe, error)
+	ReplaceRecipeById(ctx context.Context, id string, recipe models.RecipeDB) (models.Recipe, error)
+	GetRecipeById(id string) (models.Recipe, error)
+	GetRecipeByIdForAuthor(ctx context.Context, id, authorID string) (models.Recipe, error)
+	GetRecipeByIdLocale(id string, locale string) (models.Recipe, error)
+	GetRecipeDocuments(parameters models.GetRecipesRequest) ([]models.Recipe, int64, error)
+	GetRecipesByAuthor(ctx context.Context, authorID, cursor string, limit int) ([]models.Recipe, int64, error)
+	GetTranslationsByRecipeIDs(ctx context.Context, ids []string, locale string) (map[string]models.Recipe, error)
+	AddLocaleRecipe(recipe models.Recipe, locale string) (models.Recipe, error)
+	DeleteRecipeById(id string) (models.RecipeDB, error)
+	DeleteLocalizedRecipesByID(ctx context.Context, id string) error
+	TranslationBackfillCompleted(ctx context.Context) (bool, error)
+	MarkTranslationBackfillCompleted(ctx context.Context) error
 }
 
-func New(db database.Database, translator *translator.Translator, imageDir string, maxPictureBytes int) (*Service, error) {
-	stagingDir := filepath.Join(imageDir, ".staging")
-	if err := os.MkdirAll(stagingDir, 0o700); err != nil {
-		return nil, err
-	}
-	entries, err := os.ReadDir(stagingDir)
-	if err != nil {
-		return nil, err
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			_ = os.Remove(filepath.Join(stagingDir, entry.Name()))
-		}
-	}
-	return &Service{db: db, translator: translator, imageDir: imageDir, stagingDir: stagingDir, maxPictureBytes: maxPictureBytes}, nil
+// Translator is the slice of *translator.Translator the service needs. A nil
+// Translator disables source-locale detection and translate-on-write.
+type Translator interface {
+	TranslateRecipe(recipe models.Recipe, to string) (models.Recipe, error)
+	GetRecipeLocale(recipe models.Recipe) (string, error)
+}
+
+type Service struct {
+	db              Store
+	translator      Translator
+	imageDir        string
+	maxPictureBytes int
+	targetLocales   []string
+	translateSlots  chan struct{}
+}
+
+func New(db Store, translator Translator, imageDir string, maxPictureBytes int, targetLocales []string) (*Service, error) {
+	return &Service{
+		db:              db,
+		translator:      translator,
+		imageDir:        imageDir,
+		maxPictureBytes: maxPictureBytes,
+		targetLocales:   targetLocales,
+		translateSlots:  make(chan struct{}, translateConcurrency),
+	}, nil
+}
+
+// canTranslate reports whether translate-on-write is configured.
+func (s *Service) canTranslate() bool {
+	return s.translator != nil && len(s.targetLocales) > 0
 }
 
 func normalizeLocale(value string) (string, error) {
@@ -139,58 +172,52 @@ func sourceHash(recipe models.RecipeDB) string {
 	return hex.EncodeToString(hash[:])
 }
 
-type stagedPicture struct {
+// normalizedPicture is an uploaded image after in-memory normalization, with the
+// final filename it will take in the image directory. Nothing is written to disk
+// until writePictures runs.
+type normalizedPicture struct {
 	filename string
-	path     string
+	data     []byte
 }
 
-func (s *Service) stagePictures(pictures []PictureUpload) ([]stagedPicture, error) {
+func (s *Service) normalizePictures(pictures []PictureUpload) ([]normalizedPicture, error) {
 	total := 0
-	staged := make([]stagedPicture, 0, len(pictures))
-	cleanup := func() {
-		for _, picture := range staged {
-			_ = os.Remove(picture.path)
-		}
-	}
+	normalized := make([]normalizedPicture, 0, len(pictures))
 	for _, picture := range pictures {
 		total += len(picture.Data)
 		if total > s.maxPictureBytes {
-			cleanup()
 			return nil, fmt.Errorf("%w: pictures exceed the %d byte request limit", ErrInvalid, s.maxPictureBytes)
 		}
-		normalized, err := images_manager.NormalizeRecipeImage(picture.Data, picture.Filename, picture.MediaType)
+		image, err := images_manager.NormalizeRecipeImage(picture.Data, picture.Filename, picture.MediaType)
 		if err != nil {
-			cleanup()
 			return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
 		}
-		filename := primitive.NewObjectID().Hex() + normalized.Extension
-		path := filepath.Join(s.stagingDir, filename)
-		if err := images_manager.SaveBytes(s.stagingDir, filename, normalized.Data); err != nil {
-			cleanup()
+		normalized = append(normalized, normalizedPicture{
+			filename: primitive.NewObjectID().Hex() + image.Extension,
+			data:     image.Data,
+		})
+	}
+	return normalized, nil
+}
+
+// writePictures writes the normalized bytes into the image directory. On the
+// first failure it removes what it already wrote and returns the error.
+func (s *Service) writePictures(pictures []normalizedPicture) ([]string, error) {
+	written := make([]string, 0, len(pictures))
+	for _, picture := range pictures {
+		if err := images_manager.SaveBytes(s.imageDir, picture.filename, picture.data); err != nil {
+			s.removePictures(written)
 			return nil, err
 		}
-		staged = append(staged, stagedPicture{filename: filename, path: path})
+		written = append(written, picture.filename)
 	}
-	return staged, nil
+	return written, nil
 }
 
-func cleanupStaged(staged []stagedPicture) {
-	for _, picture := range staged {
-		_ = os.Remove(picture.path)
+func (s *Service) removePictures(filenames []string) {
+	for _, filename := range filenames {
+		_ = images_manager.Remove(s.imageDir, filename)
 	}
-}
-
-func (s *Service) publish(staged []stagedPicture) error {
-	for i, picture := range staged {
-		if err := os.Rename(picture.path, filepath.Join(s.imageDir, picture.filename)); err != nil {
-			for _, published := range staged[:i] {
-				_ = images_manager.Remove(s.imageDir, published.filename)
-			}
-			cleanupStaged(staged[i:])
-			return err
-		}
-	}
-	return nil
 }
 
 func (s *Service) Create(ctx context.Context, authorID string, input models.CreateRecipe, pictures []PictureUpload) (models.Recipe, error) {
@@ -213,29 +240,25 @@ func (s *Service) Create(ctx context.Context, authorID string, input models.Crea
 	if err := validateRecipe(&recipeDB); err != nil {
 		return models.Recipe{}, err
 	}
-	staged, err := s.stagePictures(pictures)
+	normalized, err := s.normalizePictures(pictures)
 	if err != nil {
 		return models.Recipe{}, err
 	}
-	for _, picture := range staged {
+	for _, picture := range normalized {
 		recipeDB.Pictures = append(recipeDB.Pictures, picture.filename)
 	}
 	recipeDB.SourceHash = sourceHash(recipeDB)
-	create := models.CreateRecipe{
-		Title: recipeDB.Title, Description: recipeDB.Description, Quantity: recipeDB.Quantity, Kind: recipeDB.Kind,
-		PreparationTime: recipeDB.PreparationTime, CookingTime: recipeDB.CookingTime, RestingTime: recipeDB.RestingTime,
-		Ingredients: recipeDB.Ingredients, Steps: recipeDB.Steps, Pictures: recipeDB.Pictures,
-		SourceLocale: recipeDB.SourceLocale, SourceHash: recipeDB.SourceHash,
+	written, err := s.writePictures(normalized)
+	if err != nil {
+		return models.Recipe{}, err
 	}
+	create := utils.DupStruct[models.CreateRecipe](&recipeDB)
 	created, err := s.db.CreateRecipe(authorID, &create)
 	if err != nil {
-		cleanupStaged(staged)
+		s.removePictures(written)
 		return models.Recipe{}, err
 	}
-	if err := s.publish(staged); err != nil {
-		_, _ = s.db.DeleteRecipeById(created.Id.Hex())
-		return models.Recipe{}, err
-	}
+	s.scheduleTranslations(created)
 	created.Locale = created.SourceLocale
 	return created, nil
 }
@@ -292,31 +315,28 @@ func mergePatch(recipe models.Recipe, patch models.UpdateRecipeRequest) (models.
 }
 
 func (s *Service) Update(ctx context.Context, recipe models.Recipe, patch models.UpdateRecipeRequest, pictures []PictureUpload) (models.Recipe, error) {
-	original := recipe.ToRecipeDB()
-	original.Locale = ""
 	merged, err := mergePatch(recipe, patch)
 	if err != nil {
 		return models.Recipe{}, err
 	}
-	staged, err := s.stagePictures(pictures)
+	normalized, err := s.normalizePictures(pictures)
 	if err != nil {
 		return models.Recipe{}, err
 	}
-	for _, picture := range staged {
+	for _, picture := range normalized {
 		merged.Pictures = append(merged.Pictures, picture.filename)
 	}
 	if err := validateRecipe(&merged); err != nil {
-		cleanupStaged(staged)
 		return models.Recipe{}, err
 	}
 	merged.SourceHash = sourceHash(merged)
-	updated, err := s.db.ReplaceRecipeById(ctx, recipe.Id.Hex(), merged)
+	written, err := s.writePictures(normalized)
 	if err != nil {
-		cleanupStaged(staged)
 		return models.Recipe{}, err
 	}
-	if err := s.publish(staged); err != nil {
-		_, _ = s.db.ReplaceRecipeById(ctx, recipe.Id.Hex(), original)
+	updated, err := s.db.ReplaceRecipeById(ctx, recipe.Id.Hex(), merged)
+	if err != nil {
+		s.removePictures(written)
 		return models.Recipe{}, err
 	}
 	kept := make(map[string]bool, len(updated.Pictures))
@@ -329,6 +349,7 @@ func (s *Service) Update(ctx context.Context, recipe models.Recipe, patch models
 		}
 	}
 	_ = s.db.DeleteLocalizedRecipesByID(ctx, recipe.Id.Hex())
+	s.scheduleTranslations(updated)
 	updated.Locale = updated.SourceLocale
 	return updated, nil
 }
@@ -348,7 +369,7 @@ func (s *Service) GetForUser(ctx context.Context, recipeID, userID, locale strin
 		}
 		return models.Recipe{}, err
 	}
-	return s.localize(ctx, recipe, locale), nil
+	return s.localize(recipe, locale), nil
 }
 
 func (s *Service) Get(ctx context.Context, recipeID, locale string) (models.Recipe, error) {
@@ -366,7 +387,7 @@ func (s *Service) Get(ctx context.Context, recipeID, locale string) (models.Reci
 		}
 		return models.Recipe{}, err
 	}
-	return s.localize(ctx, recipe, locale), nil
+	return s.localize(recipe, locale), nil
 }
 
 func sameBaseLocale(left, right string) bool {
@@ -380,50 +401,36 @@ func sameBaseLocale(left, right string) bool {
 	return lb == rb
 }
 
-func (s *Service) localize(ctx context.Context, canonical models.Recipe, requested string) models.Recipe {
-	needsBackfill := canonical.SourceLocale == "" || canonical.SourceHash == ""
-	if canonical.SourceLocale == "" && s.translator != nil {
-		if detected, err := s.translator.GetRecipeLocale(canonical); err == nil {
-			canonical.SourceLocale, _ = normalizeLocale(detected)
-		}
+// wantsTranslation reports whether a translation row is worth looking up for the
+// requested locale: it must be a valid, non-empty locale that differs from the
+// recipe's source, and the recipe must carry the id and hash a row is keyed on.
+func wantsTranslation(canonical models.Recipe, requested string) bool {
+	return requested != "" && canonical.Id != nil && canonical.SourceHash != "" &&
+		!sameBaseLocale(canonical.SourceLocale, requested)
+}
+
+// pickTranslation returns the stored translation when it matches the canonical's
+// source hash, otherwise the canonical recipe. Either way Locale is stamped with
+// what is actually being served.
+func pickTranslation(canonical, translation models.Recipe, requested string, found bool) models.Recipe {
+	if found && translation.SourceHash != "" && translation.SourceHash == canonical.SourceHash {
+		translation.Locale = requested
+		return translation
 	}
-	if canonical.SourceHash == "" {
-		canonical.SourceHash = sourceHash(canonical.ToRecipeDB())
-	}
-	if needsBackfill && canonical.SourceLocale != "" && canonical.Id != nil {
-		// Backfill locale/hash for recipes created before localization metadata existed.
-		if stored, err := s.db.ReplaceRecipeById(ctx, canonical.Id.Hex(), canonical.ToRecipeDB()); err == nil {
-			canonical = stored
-		}
-	}
+	canonical.Locale = canonical.SourceLocale
+	return canonical
+}
+
+// localize serves the stored translation for one recipe, or the canonical recipe
+// when none is current. It never calls the translator and never writes.
+func (s *Service) localize(canonical models.Recipe, requested string) models.Recipe {
 	requested, err := normalizeLocale(requested)
-	if err != nil || requested == "" || sameBaseLocale(canonical.SourceLocale, requested) {
+	if err != nil || !wantsTranslation(canonical, requested) {
 		canonical.Locale = canonical.SourceLocale
 		return canonical
 	}
-	localized, err := s.db.GetRecipeByIdLocale(canonical.Id.Hex(), requested)
-	if err == nil && localized.SourceHash != "" && localized.SourceHash == canonical.SourceHash {
-		localized.Locale = requested
-		return localized
-	}
-	if s.translator == nil {
-		canonical.Locale = canonical.SourceLocale
-		return canonical
-	}
-	translated, err := s.translator.TranslateRecipe(canonical, requested)
-	if err != nil {
-		canonical.Locale = canonical.SourceLocale
-		return canonical
-	}
-	translated.SourceLocale = canonical.SourceLocale
-	translated.Locale = requested
-	translated.SourceHash = canonical.SourceHash
-	stored, err := s.db.AddLocaleRecipe(translated, requested)
-	if err != nil {
-		return translated
-	}
-	stored.Locale = requested
-	return stored
+	translation, err := s.db.GetRecipeByIdLocale(canonical.Id.Hex(), requested)
+	return pickTranslation(canonical, translation, requested, err == nil)
 }
 
 func (s *Service) List(ctx context.Context, parameters models.GetRecipesRequest) ([]models.RecipePreview, int64, error) {
@@ -467,10 +474,30 @@ func (s *Service) ListForUser(ctx context.Context, userID, cursor string, limit 
 	return s.localizePreviews(ctx, documents, locale), count, next, nil
 }
 
-func (s *Service) localizePreviews(ctx context.Context, documents []models.Recipe, locale string) []models.RecipePreview {
+func (s *Service) localizePreviews(ctx context.Context, documents []models.Recipe, requested string) []models.RecipePreview {
+	requested, err := normalizeLocale(requested)
+	translations := map[string]models.Recipe{}
+	if err == nil && requested != "" {
+		ids := make([]string, 0, len(documents))
+		for _, document := range documents {
+			if wantsTranslation(document, requested) {
+				ids = append(ids, document.Id.Hex())
+			}
+		}
+		if len(ids) > 0 {
+			if fetched, fetchErr := s.db.GetTranslationsByRecipeIDs(ctx, ids, requested); fetchErr == nil {
+				translations = fetched
+			}
+		}
+	}
 	previews := make([]models.RecipePreview, 0, len(documents))
 	for _, document := range documents {
-		recipe := s.localize(ctx, document, locale)
+		recipe := document
+		recipe.Locale = document.SourceLocale
+		if document.Id != nil {
+			translation, found := translations[document.Id.Hex()]
+			recipe = pickTranslation(document, translation, requested, found)
+		}
 		previews = append(previews, models.RecipePreview{
 			Id: recipe.Id, Title: recipe.Title, Description: recipe.Description, Author: recipe.Author,
 			PreparationTime: recipe.PreparationTime, CookingTime: recipe.CookingTime, RestingTime: recipe.RestingTime,

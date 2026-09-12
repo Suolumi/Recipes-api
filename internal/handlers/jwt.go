@@ -43,7 +43,7 @@ func (h *Handlers) Refresh(c echo.Context) error {
 		return errorResponse(http.StatusBadRequest, err.Error(), err, c)
 	}
 
-	decodedJwt, err := jwt_manager.DecodeJWT[models.RefreshJwt](h.jwt.RefreshSecret, body.RefreshToken, jwt_manager.PurposeRefresh)
+	decodedJwt, err := jwt_manager.DecodeJWT[models.TokenClaims](h.jm.RefreshSecret, body.RefreshToken, jwt_manager.PurposeRefresh)
 	if err != nil {
 		return errorResponse(http.StatusUnauthorized, "Invalid or expired refresh token", nil, c)
 	}
@@ -59,7 +59,7 @@ func (h *Handlers) Refresh(c echo.Context) error {
 		return errorResponse(http.StatusInternalServerError, "Could not refresh access token", err, c)
 	}
 
-	accessJwt, accessToken, err := h.jm.GenerateAccessJwt(decodedJwt.UserId, user.Admin, h.jwt.AccessExpiration)
+	accessJwt, accessToken, err := h.jm.Generate(jwt_manager.PurposeAccess, decodedJwt.UserId, user.Admin)
 	if err != nil {
 		return errorResponse(http.StatusInternalServerError, "Could not generate access token", err, c)
 	}

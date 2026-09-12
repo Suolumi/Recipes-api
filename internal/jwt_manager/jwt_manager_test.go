@@ -7,26 +7,67 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"recipes/internal/config"
 	"recipes/internal/models"
 )
 
-func TestDecodeJWT(t *testing.T) {
-	manager := JwtManager{AccessSecret: "access-secret", RefreshSecret: "refresh-secret"}
-	_, token, err := manager.GenerateAccessJwt("user-id", false, time.Hour)
-	require.NoError(t, err)
+func testManager() *JwtManager {
+	return &JwtManager{
+		AccessSecret:      "access-secret",
+		AccessExpiration:  time.Hour,
+		RefreshSecret:     "refresh-secret",
+		RefreshExpiration: time.Hour,
+		ResetSecret:       "reset-secret",
+		ResetExpiration:   time.Hour,
+	}
+}
 
-	t.Run("requires the expected purpose", func(t *testing.T) {
-		_, err := DecodeJWT[models.AccessJwt](manager.AccessSecret, token, PurposeRefresh)
-		assert.Error(t, err)
+func TestGenerateAndDecode(t *testing.T) {
+	m := testManager()
 
-		decoded, err := DecodeJWT[models.AccessJwt](manager.AccessSecret, token, PurposeAccess)
-		require.NoError(t, err)
-		assert.Equal(t, "user-id", decoded.UserId)
-		assert.Equal(t, PurposeAccess, decoded.Purpose)
+	for _, tc := range []struct{ purpose, secret string }{
+		{PurposeAccess, m.AccessSecret},
+		{PurposeRefresh, m.RefreshSecret},
+		{PurposeReset, m.ResetSecret},
+	} {
+		t.Run(tc.purpose, func(t *testing.T) {
+			claims, token, err := m.Generate(tc.purpose, "user-id", true)
+			require.NoError(t, err)
+			assert.Equal(t, tc.purpose, claims.Purpose)
+			require.NotNil(t, claims.ExpiresAt)
+
+			decoded, err := DecodeJWT[models.TokenClaims](tc.secret, token, tc.purpose)
+			require.NoError(t, err)
+			assert.Equal(t, "user-id", decoded.UserId)
+			assert.Equal(t, tc.purpose, decoded.Purpose)
+
+			_, err = DecodeJWT[models.TokenClaims](tc.secret, token, "some-other-purpose")
+			assert.Error(t, err, "wrong expected purpose must be rejected")
+
+			_, err = DecodeJWT[models.TokenClaims]("wrong-secret", token, tc.purpose)
+			assert.Error(t, err, "wrong secret must be rejected")
+		})
+	}
+}
+
+func TestGenerateUnknownPurpose(t *testing.T) {
+	_, _, err := testManager().Generate("nonsense", "user-id", false)
+	assert.Error(t, err)
+}
+
+func TestNewCopiesConfig(t *testing.T) {
+	m := New(&config.JwtConfig{
+		AccessSecret:      "s-access",
+		AccessExpiration:  15 * time.Minute,
+		RefreshSecret:     "s-refresh",
+		RefreshExpiration: 48 * time.Hour,
+		ResetSecret:       "s-reset",
+		ResetExpiration:   time.Hour,
 	})
-
-	t.Run("rejects a wrong secret", func(t *testing.T) {
-		_, err := DecodeJWT[models.AccessJwt]("wrong-secret", token, PurposeAccess)
-		assert.Error(t, err)
-	})
+	assert.Equal(t, "s-access", m.AccessSecret)
+	assert.Equal(t, 15*time.Minute, m.AccessExpiration)
+	assert.Equal(t, "s-refresh", m.RefreshSecret)
+	assert.Equal(t, 48*time.Hour, m.RefreshExpiration)
+	assert.Equal(t, "s-reset", m.ResetSecret)
+	assert.Equal(t, time.Hour, m.ResetExpiration)
 }

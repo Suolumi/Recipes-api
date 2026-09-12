@@ -14,11 +14,36 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-const translationMigrationID = "recipe_translations_v1"
+const (
+	translationMigrationID = "recipe_translations_v1"
+	translationBackfillID  = "recipe_translations_populate_v1"
+)
 
 type schemaMigration struct {
 	ID          string    `bson:"_id"`
 	CompletedAt time.Time `bson:"completed_at"`
+}
+
+// TranslationBackfillCompleted reports whether the one-shot translate-existing-
+// recipes pass has already finished.
+func (c *Client) TranslationBackfillCompleted(ctx context.Context) (bool, error) {
+	err := c.db.Collection("schema_migrations").FindOne(ctx, bson.M{"_id": translationBackfillID}).Err()
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return false, nil
+	}
+	return false, err
+}
+
+// MarkTranslationBackfillCompleted records that the backfill pass finished
+// cleanly so it never runs again.
+func (c *Client) MarkTranslationBackfillCompleted(ctx context.Context) error {
+	_, err := c.db.Collection("schema_migrations").UpdateOne(ctx, bson.M{"_id": translationBackfillID}, bson.M{
+		"$setOnInsert": schemaMigration{ID: translationBackfillID, CompletedAt: time.Now()},
+	}, options.Update().SetUpsert(true))
+	return err
 }
 
 func (c *Client) EnsureIndexes(ctx context.Context) error {

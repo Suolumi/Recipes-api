@@ -6,16 +6,16 @@ import (
 	"recipes/internal/mail_sender"
 	"recipes/internal/translator"
 	"recipes/internal/utils"
+	"strings"
 	"time"
+
+	"golang.org/x/text/language"
 )
 
 type MCPConfig struct {
 	PublicURL              string
 	JWTSecret              string
-	AccessExpiration       time.Duration
-	RefreshExpiration      time.Duration
-	AuthorizationCodeTTL   time.Duration
-	IdempotencyTTL         time.Duration
+	TokenExpiration        time.Duration
 	MaxDecodedPictureBytes int
 }
 
@@ -56,6 +56,33 @@ type Config struct {
 	Translator *translator.TranslatorConfig
 	Mails      *mail_sender.MailSenderConfig
 	MCP        *MCPConfig
+
+	// TranslationLocales is Translator.Locales parsed and normalized. Empty
+	// disables translate-on-write. Populated by NewConfig, not from the env.
+	TranslationLocales []string
+}
+
+// parseLocales splits a comma-separated locale list, normalizing each tag and
+// rejecting any it cannot parse. Blank entries are ignored; duplicates collapse.
+func parseLocales(raw string) ([]string, error) {
+	seen := make(map[string]bool)
+	var locales []string
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		tag, err := language.Parse(part)
+		if err != nil || tag == language.Und {
+			return nil, fmt.Errorf("invalid locale %q", part)
+		}
+		normalized := tag.String()
+		if !seen[normalized] {
+			seen[normalized] = true
+			locales = append(locales, normalized)
+		}
+	}
+	return locales, nil
 }
 
 func NewConfig(prefix ...string) (*Config, error) {
@@ -92,13 +119,11 @@ func NewConfig(prefix ...string) (*Config, error) {
 			RecipeImageTimeout: time.Hour,
 		},
 		Translator: &translator.TranslatorConfig{
-			ApiKey: "",
+			ApiKey:  "",
+			Locales: "en,fr,fi",
 		},
 		MCP: &MCPConfig{
-			AccessExpiration:       time.Hour,
-			RefreshExpiration:      30 * 24 * time.Hour,
-			AuthorizationCodeTTL:   10 * time.Minute,
-			IdempotencyTTL:         24 * time.Hour,
+			TokenExpiration:        365 * 24 * time.Hour,
 			MaxDecodedPictureBytes: 64 << 20,
 		},
 	}
@@ -106,6 +131,11 @@ func NewConfig(prefix ...string) (*Config, error) {
 	err := utils.LoadConfigFromEnv(&cfg, prefix...)
 	if err != nil {
 		return nil, err
+	}
+
+	cfg.TranslationLocales, err = parseLocales(cfg.Translator.Locales)
+	if err != nil {
+		return nil, fmt.Errorf("RECIPES_TRANSLATOR_LOCALES: %w", err)
 	}
 
 	if cfg.MCP.PublicURL == "" {

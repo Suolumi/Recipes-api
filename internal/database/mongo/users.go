@@ -85,6 +85,21 @@ func (c *Client) UpdateUserById(id string, user models.UserDB) (models.UserDB, e
 	return c.GetUserById(id)
 }
 
+func (c *Client) BumpMCPAuthVersion(ctx context.Context, id string) error {
+	objectID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return err
+	}
+	result, err := c.db.Collection(userCollection).UpdateOne(ctx, bson.M{"_id": objectID}, bson.M{"$inc": bson.M{"mcp_auth_version": 1}})
+	if err != nil {
+		return err
+	}
+	if result.MatchedCount == 0 {
+		return UserNotFoundError
+	}
+	return nil
+}
+
 func (c *Client) UpdateUserInterfaceById(id string, user interface{}) (models.UserDB, error) {
 	objectId, err := primitive.ObjectIDFromHex(id)
 	if err != nil {

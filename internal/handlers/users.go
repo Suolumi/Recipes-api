@@ -25,7 +25,7 @@ import (
 // @Security BearerAuth
 // @Router /users/me [get]
 func (h *Handlers) GetMe(c echo.Context) error {
-	jwt := jwt_manager.GetJwt[*models.AccessJwt](c)
+	jwt := jwt_manager.GetJwt[*models.TokenClaims](c)
 
 	user, err := h.db.GetUserById(jwt.UserId)
 	if err != nil {
@@ -50,7 +50,7 @@ func (h *Handlers) GetMe(c echo.Context) error {
 // @Security BearerAuth
 // @Router /users/me [patch]
 func (h *Handlers) UpdateMe(c echo.Context) error {
-	jwt := jwt_manager.GetJwt[*models.AccessJwt](c)
+	jwt := jwt_manager.GetJwt[*models.TokenClaims](c)
 
 	var user models.UpdateUser
 	var err error
@@ -104,7 +104,7 @@ func (h *Handlers) UpdateMe(c echo.Context) error {
 // @Security BearerAuth
 // @Router /users/me [delete]
 func (h *Handlers) DeleteMe(c echo.Context) error {
-	jwt := jwt_manager.GetJwt[*models.AccessJwt](c)
+	jwt := jwt_manager.GetJwt[*models.TokenClaims](c)
 
 	user, err := h.db.DeleteUserById(jwt.UserId)
 	if err != nil {
@@ -132,7 +132,7 @@ func (h *Handlers) DeleteMe(c echo.Context) error {
 // @Security BearerAuth
 // @Router /users/me/picture [post]
 func (h *Handlers) UploadProfilePicture(c echo.Context) error {
-	jwt := jwt_manager.GetJwt[*models.AccessJwt](c)
+	jwt := jwt_manager.GetJwt[*models.TokenClaims](c)
 
 	formFile, err := c.FormFile("file")
 	if err != nil {
@@ -183,7 +183,7 @@ func (h *Handlers) UploadProfilePicture(c echo.Context) error {
 // @Security BearerAuth
 // @Router /users/me/picture [delete]
 func (h *Handlers) DeleteProfilePicture(c echo.Context) error {
-	jwt := jwt_manager.GetJwt[*models.AccessJwt](c)
+	jwt := jwt_manager.GetJwt[*models.TokenClaims](c)
 	user, err := h.db.GetUserById(jwt.UserId)
 	if err != nil {
 		return errorResponse(http.StatusInternalServerError, "Could not get user", err, c)

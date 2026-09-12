@@ -18,11 +18,9 @@ import (
 	"recipes/internal/config"
 	"recipes/internal/database"
 	"recipes/internal/database/mongo"
-	"recipes/internal/idempotency"
 	"recipes/internal/images_manager"
 	"recipes/internal/jwt_manager"
 	"recipes/internal/mail_sender"
-	"recipes/internal/mcp_auth"
 	"recipes/internal/mcp_server"
 	"recipes/internal/models"
 	"recipes/internal/recipe_service"
@@ -34,14 +32,11 @@ type Handlers struct {
 	db      database.Database
 	e       *echo.Echo
 	jm      *jwt_manager.JwtManager
-	jwt     *config.JwtConfig
 	cfg     *config.RuntimeConfig
 	ms      *mail_sender.MailSender
-	t       *translator.Translator
 	recipes *recipe_service.Service
-	oauth   *mcp_auth.Server
+	mcpAuth *mcp_server.Authenticator
 	mcp     *mcp_server.Server
-	idem    *idempotency.Store
 }
 
 func New(cfg *config.Config) (*Handlers, error) {
@@ -70,7 +65,7 @@ func New(cfg *config.Config) (*Handlers, error) {
 		return nil, err
 	}
 
-	jm := jwt_manager.JwtManager(*cfg.Jwt)
+	jm := jwt_manager.New(cfg.Jwt)
 
 	// Create admin user
 	adminUser, adminConflictErr := db.UserConflicts(models.UserDB{
@@ -100,22 +95,18 @@ func New(cfg *config.Config) (*Handlers, error) {
 	if err != nil {
 		utils.LogError("Failed to create translator", err)
 	}
+	var recipeTranslator recipe_service.Translator
+	if transl != nil {
+		recipeTranslator = transl
+	}
 
-	recipeService, err := recipe_service.New(db, transl, cfg.Cfg.RecipeImageDir, cfg.MCP.MaxDecodedPictureBytes)
+	recipeService, err := recipe_service.New(db, recipeTranslator, cfg.Cfg.RecipeImageDir, cfg.MCP.MaxDecodedPictureBytes, cfg.TranslationLocales)
 	if err != nil {
 		return nil, err
 	}
 
-	oauthServer, err := mcp_auth.NewServer(context.Background(), cfg.MCP, db)
-	if err != nil {
-		return nil, err
-	}
-	mcpServer, err := mcp_server.New(context.Background(), cfg.MCP, db, recipeService, oauthServer)
-	if err != nil {
-		return nil, err
-	}
-
-	idempotencyStore, err := idempotency.New(context.Background(), db.RawDatabase(), cfg.MCP.IdempotencyTTL)
+	mcpAuth := mcp_server.NewAuthenticator(db, cfg.MCP.JWTSecret, cfg.MCP.TokenExpiration)
+	mcpServer, err := mcp_server.New(cfg.MCP, recipeService, mcpAuth.Verifier())
 	if err != nil {
 		return nil, err
 	}
@@ -125,15 +116,12 @@ func New(cfg *config.Config) (*Handlers, error) {
 	handlers := &Handlers{
 		db:      db,
 		e:       e,
-		jm:      &jm,
-		jwt:     cfg.Jwt,
+		jm:      jm,
 		cfg:     cfg.Cfg,
 		ms:      mail_sender.New(cfg.Mails),
-		t:       transl,
 		recipes: recipeService,
-		oauth:   oauthServer,
+		mcpAuth: mcpAuth,
 		mcp:     mcpServer,
-		idem:    idempotencyStore,
 	}
 	ready = true
 	return handlers, nil
@@ -150,7 +138,7 @@ func (h *Handlers) RegisterEndpoints() {
 
 	adminMiddleware := func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
-			jwt := jwt_manager.GetJwt[*models.AccessJwt](c)
+			jwt := jwt_manager.GetJwt[*models.TokenClaims](c)
 			if jwt.Admin {
 				return next(c)
 			}
@@ -161,7 +149,7 @@ func (h *Handlers) RegisterEndpoints() {
 	unprotectedRouter := h.e.Group("/api/v1")
 	restCORS := middleware.CORSWithConfig(middleware.CORSConfig{
 		AllowOrigins:  []string{h.cfg.WebappUrl},
-		AllowHeaders:  []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization, "Idempotency-Key"},
+		AllowHeaders:  []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization},
 		AllowMethods:  []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions},
 		ExposeHeaders: []string{echo.HeaderXRequestID},
 	})
@@ -172,7 +160,7 @@ func (h *Handlers) RegisterEndpoints() {
 			if !ok || claims == nil {
 				return errorResponse(http.StatusUnauthorized, "Invalid or expired token", nil, c)
 			}
-			access, ok := claims.Claims.(*models.AccessJwt)
+			access, ok := claims.Claims.(*models.TokenClaims)
 			if !ok || access.Purpose != jwt_manager.PurposeAccess || access.UserId == "" {
 				return errorResponse(http.StatusUnauthorized, "Invalid or expired token", nil, c)
 			}
@@ -183,8 +171,8 @@ func (h *Handlers) RegisterEndpoints() {
 		restCORS,
 		h.QueryJwt,
 		echojwt.WithConfig(echojwt.Config{
-			NewClaimsFunc: jwt_manager.NewJwtClaims[models.AccessJwt],
-			SigningKey:    []byte(h.jwt.AccessSecret),
+			NewClaimsFunc: jwt_manager.NewJwtClaims[models.TokenClaims],
+			SigningKey:    []byte(h.jm.AccessSecret),
 			SigningMethod: "HS256",
 			ContextKey:    "jwt",
 		}),
@@ -196,13 +184,6 @@ func (h *Handlers) RegisterEndpoints() {
 		}),
 	})
 
-	// OAuth discovery and authorization for generic remote MCP clients.
-	h.e.GET("/.well-known/oauth-protected-resource/mcp", echo.WrapHandler(http.HandlerFunc(h.oauth.ProtectedResourceMetadata)))
-	h.e.GET("/.well-known/oauth-authorization-server", echo.WrapHandler(http.HandlerFunc(h.oauth.AuthorizationServerMetadata)))
-	h.e.GET("/oauth/authorize", echo.WrapHandler(http.HandlerFunc(h.oauth.Authorize)), authLimiter)
-	h.e.POST("/oauth/authorize", echo.WrapHandler(http.HandlerFunc(h.oauth.Authorize)), authLimiter)
-	h.e.POST("/oauth/token", echo.WrapHandler(http.HandlerFunc(h.oauth.Token)), authLimiter)
-	h.e.OPTIONS("/oauth/token", echo.WrapHandler(http.HandlerFunc(h.oauth.Token)))
 	h.e.Any("/mcp", echo.WrapHandler(h.mcp.Handler()))
 
 	unprotectedRouter.POST("/login", h.Login, middleware.BodyLimit("1M"), authLimiter)
@@ -220,6 +201,10 @@ func (h *Handlers) RegisterEndpoints() {
 	protectedRouter.POST("/users/me/picture", h.UploadProfilePicture, middleware.BodyLimit("10M"))
 	protectedRouter.DELETE("/users/me/picture", h.DeleteProfilePicture)
 
+	// MCP token management
+	protectedRouter.POST("/mcp/token", h.MintMCPToken, authLimiter)
+	protectedRouter.DELETE("/mcp/token", h.RevokeMCPToken, authLimiter)
+
 	// User routes
 	unprotectedRouter.GET("/users", h.GetUsers)
 	unprotectedRouter.GET("/users/:id", h.GetUser)
@@ -234,12 +219,14 @@ func (h *Handlers) RegisterEndpoints() {
 	unprotectedRouter.GET("/recipes/:id", h.GetRecipe)
 	protectedRouter.PATCH("/recipes/:id", h.UpdateRecipe, h.RecipeAuthorMiddleware, middleware.BodyLimit("90M"))
 	protectedRouter.DELETE("/recipes/:id", h.DeleteRecipe, h.RecipeAuthorMiddleware)
+	protectedRouter.POST("/recipes/:id/retranslate", h.RetranslateRecipe, adminMiddleware, authLimiter)
 
 	// Recipes images
 	unprotectedRouter.Static("/recipe-pictures", h.cfg.RecipeImageDir)
 }
 
 func (h *Handlers) StartBackgroundMaintenance(ctx context.Context) {
+	go h.recipes.BackfillTranslations(ctx)
 	go func() {
 		references, err := h.db.ReferencedPictures(ctx)
 		if err != nil {

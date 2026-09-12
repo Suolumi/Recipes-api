@@ -43,12 +43,12 @@ func (h *Handlers) Login(c echo.Context) error {
 		return errorResponse(http.StatusUnauthorized, "Incorrect username or password", nil, c)
 	}
 
-	accessJwt, accessToken, err := h.jm.GenerateAccessJwt(user.Id.Hex(), user.Admin, h.jwt.AccessExpiration)
+	accessJwt, accessToken, err := h.jm.Generate(jwt_manager.PurposeAccess, user.Id.Hex(), user.Admin)
 	if err != nil {
 		return errorResponse(http.StatusInternalServerError, "Could not generate access token", err, c)
 	}
 
-	refreshJwt, refreshToken, err := h.jm.GenerateRefreshJwt(user.Id.Hex(), user.Admin, h.jwt.RefreshExpiration)
+	refreshJwt, refreshToken, err := h.jm.Generate(jwt_manager.PurposeRefresh, user.Id.Hex(), user.Admin)
 	if err != nil {
 		return errorResponse(http.StatusInternalServerError, "Could not generate refresh token", err, c)
 	}
@@ -117,12 +117,12 @@ func (h *Handlers) Register(c echo.Context) error {
 		return errorResponse(http.StatusInternalServerError, "Could not create user", err, c)
 	}
 
-	accessJwt, accessToken, err := h.jm.GenerateAccessJwt(createdUser.Id.Hex(), createdUser.Admin, h.jwt.AccessExpiration)
+	accessJwt, accessToken, err := h.jm.Generate(jwt_manager.PurposeAccess, createdUser.Id.Hex(), createdUser.Admin)
 	if err != nil {
 		return errorResponse(http.StatusInternalServerError, "Could not generate access token", err, c)
 	}
 
-	refreshJwt, refreshToken, err := h.jm.GenerateRefreshJwt(createdUser.Id.Hex(), createdUser.Admin, h.jwt.RefreshExpiration)
+	refreshJwt, refreshToken, err := h.jm.Generate(jwt_manager.PurposeRefresh, createdUser.Id.Hex(), createdUser.Admin)
 	if err != nil {
 		return errorResponse(http.StatusInternalServerError, "Could not generate refresh token", err, c)
 	}
@@ -153,7 +153,7 @@ func (h *Handlers) ForgotPassword(c echo.Context) error {
 		return errorResponse(http.StatusInternalServerError, "Could not process the request", err, c)
 	}
 
-	_, token, err := h.jm.GenerateResetJwt(user.Id.Hex(), h.jm.ResetExpiration)
+	_, token, err := h.jm.Generate(jwt_manager.PurposeReset, user.Id.Hex(), false)
 	if err != nil {
 		return errorResponse(http.StatusInternalServerError, "Could not create reset token", err, c)
 	}
@@ -179,7 +179,7 @@ func (h *Handlers) ResetPassword(c echo.Context) error {
 	token := c.Param("token")
 	var data models.ResetPasswordRequest
 
-	jwt, err := jwt_manager.DecodeJWT[models.ResetJwt](h.jm.ResetSecret, token, jwt_manager.PurposeReset)
+	jwt, err := jwt_manager.DecodeJWT[models.TokenClaims](h.jm.ResetSecret, token, jwt_manager.PurposeReset)
 	if err != nil {
 		return errorResponse(http.StatusUnauthorized, "Invalid or expired reset token", nil, c)
 	}

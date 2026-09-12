@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"github.com/disintegration/imaging"
-	"golang.org/x/exp/slices"
 	"image"
 	_ "image/jpeg"
 	_ "image/png"
@@ -25,32 +24,6 @@ type NormalizedImage struct {
 	Data      []byte
 	Extension string
 	MediaType string
-}
-
-func Save(formFile *multipart.FileHeader, saveDir, fileName string) (rerr error) {
-	if formFile == nil {
-		return fmt.Errorf("image is required")
-	}
-	filePath := filepath.Join(saveDir, filepath.Base(fileName))
-	if err := os.MkdirAll(saveDir, 0o700); err != nil {
-		return err
-	}
-
-	reader, err := formFile.Open()
-	if err != nil {
-		return err
-	}
-	defer reader.Close()
-
-	writer, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err = io.Copy(writer, reader); err != nil {
-		_ = writer.Close()
-		return err
-	}
-	return writer.Close()
 }
 
 func Remove(saveDir, fileName string) error {
@@ -149,15 +122,4 @@ func NormalizeMultipartImage(formFile *multipart.FileHeader, maxBytes int64) (No
 		return NormalizedImage{}, fmt.Errorf("file size exceeds %d bytes", maxBytes)
 	}
 	return NormalizeRecipeImage(data, formFile.Filename, formFile.Header.Get("Content-Type"))
-}
-
-func CheckImage(formFile *multipart.FileHeader) error {
-	if formFile == nil {
-		return fmt.Errorf("image is required")
-	}
-	if !slices.Contains([]string{".jpg", ".jpeg", ".png"}, strings.ToLower(filepath.Ext(formFile.Filename))) {
-		return fmt.Errorf("valid image formats are: .jpg, .jpeg, .png")
-	}
-	_, err := NormalizeMultipartImage(formFile, 8<<20)
-	return err
 }

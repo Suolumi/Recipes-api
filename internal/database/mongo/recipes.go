@@ -187,23 +187,6 @@ func (c *Client) DeleteRecipeById(id string) (models.RecipeDB, error) {
 	return recipe, nil
 }
 
-func (c *Client) GetRecipes(parameters models.GetRecipesRequest) ([]models.RecipePreview, int64, error) {
-	documents, count, err := c.GetRecipeDocuments(parameters)
-	if err != nil {
-		return nil, 0, err
-	}
-	recipes := make([]models.RecipePreview, 0, len(documents))
-	for _, recipe := range documents {
-		recipes = append(recipes, models.RecipePreview{
-			Id: recipe.Id, Title: recipe.Title, Description: recipe.Description, Author: recipe.Author,
-			PreparationTime: recipe.PreparationTime, CookingTime: recipe.CookingTime, RestingTime: recipe.RestingTime,
-			Kind: recipe.Kind, Quantity: recipe.Quantity, Pictures: recipe.Pictures,
-			SourceLocale: recipe.SourceLocale, Locale: recipe.Locale,
-		})
-	}
-	return recipes, count, nil
-}
-
 func (c *Client) GetRecipeDocuments(parameters models.GetRecipesRequest) ([]models.Recipe, int64, error) {
 	var pipeline []bson.D
 

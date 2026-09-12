@@ -11,7 +11,6 @@ import (
 
 	"github.com/labstack/echo/v4"
 
-	"recipes/internal/idempotency"
 	"recipes/internal/jwt_manager"
 	"recipes/internal/models"
 	"recipes/internal/recipe_service"
@@ -29,20 +28,6 @@ func recipeServiceError(err error, c echo.Context) error {
 	default:
 		return errorResponse(http.StatusInternalServerError, "Could not process recipe", err, c)
 	}
-}
-
-func idempotencyError(err error, c echo.Context) error {
-	if errors.Is(err, idempotency.ErrConflict) || errors.Is(err, idempotency.ErrPending) {
-		return errorResponse(http.StatusConflict, err.Error(), nil, c)
-	}
-	return errorResponse(http.StatusInternalServerError, "Could not process idempotent request", err, c)
-}
-
-func validateRESTIdempotencyKey(key string, c echo.Context) error {
-	if len(key) > 200 {
-		return errorResponse(http.StatusBadRequest, "Idempotency-Key must not exceed 200 bytes", nil, c)
-	}
-	return nil
 }
 
 func readPictureParts(files []*multipart.FileHeader) ([]recipe_service.PictureUpload, error) {
@@ -125,35 +110,10 @@ func (h *Handlers) CreateRecipe(c echo.Context) error {
 		}
 		return errorResponse(http.StatusBadRequest, err.Error(), nil, c)
 	}
-	jwt := jwt_manager.GetJwt[*models.AccessJwt](c)
-	key := strings.TrimSpace(c.Request().Header.Get("Idempotency-Key"))
-	if err := validateRESTIdempotencyKey(key, c); err != nil {
-		return err
-	}
-	if key != "" {
-		var replay models.Recipe
-		done, reserveErr := h.idem.Reserve(c.Request().Context(), jwt.UserId, "rest_create_recipe", key, struct {
-			Recipe   models.CreateRecipe
-			Pictures []recipe_service.PictureUpload
-		}{body, pictures}, &replay)
-		if reserveErr != nil {
-			return idempotencyError(reserveErr, c)
-		}
-		if done {
-			return c.JSON(http.StatusCreated, replay)
-		}
-	}
+	jwt := jwt_manager.GetJwt[*models.TokenClaims](c)
 	recipe, err := h.recipes.Create(c.Request().Context(), jwt.UserId, body, pictures)
 	if err != nil {
-		if key != "" {
-			h.idem.Abandon(c.Request().Context(), jwt.UserId, "rest_create_recipe", key)
-		}
 		return recipeServiceError(err, c)
-	}
-	if key != "" {
-		if err := h.idem.Complete(c.Request().Context(), jwt.UserId, "rest_create_recipe", key, recipe); err != nil {
-			return idempotencyError(err, c)
-		}
 	}
 	return c.JSON(http.StatusCreated, recipe)
 }
@@ -207,36 +167,9 @@ func (h *Handlers) UpdateRecipe(c echo.Context) error {
 		return errorResponse(http.StatusBadRequest, err.Error(), nil, c)
 	}
 	recipe := c.Get("recipe").(models.Recipe)
-	jwt := jwt_manager.GetJwt[*models.AccessJwt](c)
-	key := strings.TrimSpace(c.Request().Header.Get("Idempotency-Key"))
-	if err := validateRESTIdempotencyKey(key, c); err != nil {
-		return err
-	}
-	if key != "" {
-		var replay models.Recipe
-		done, reserveErr := h.idem.Reserve(c.Request().Context(), jwt.UserId, "rest_update_recipe", key, struct {
-			RecipeID string
-			Patch    models.UpdateRecipeRequest
-			Pictures []recipe_service.PictureUpload
-		}{c.Param("id"), body, pictures}, &replay)
-		if reserveErr != nil {
-			return idempotencyError(reserveErr, c)
-		}
-		if done {
-			return c.JSON(http.StatusOK, replay)
-		}
-	}
 	updated, err := h.recipes.Update(c.Request().Context(), recipe, body, pictures)
 	if err != nil {
-		if key != "" {
-			h.idem.Abandon(c.Request().Context(), jwt.UserId, "rest_update_recipe", key)
-		}
 		return recipeServiceError(err, c)
-	}
-	if key != "" {
-		if err := h.idem.Complete(c.Request().Context(), jwt.UserId, "rest_update_recipe", key, updated); err != nil {
-			return idempotencyError(err, c)
-		}
 	}
 	return c.JSON(http.StatusOK, updated)
 }
@@ -249,9 +182,18 @@ func (h *Handlers) DeleteRecipe(c echo.Context) error {
 	return c.JSON(http.StatusOK, recipe)
 }
 
+// RetranslateRecipe schedules a fresh translation of one recipe into every
+// configured target locale. Admin only; returns once the work is queued.
+func (h *Handlers) RetranslateRecipe(c echo.Context) error {
+	if err := h.recipes.Retranslate(c.Request().Context(), c.Param("id")); err != nil {
+		return recipeServiceError(err, c)
+	}
+	return messageResponse(http.StatusAccepted, "Retranslation scheduled", c)
+}
+
 func (h *Handlers) RecipeAuthorMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		jwt := jwt_manager.GetJwt[*models.AccessJwt](c)
+		jwt := jwt_manager.GetJwt[*models.TokenClaims](c)
 		recipe, err := h.db.GetRecipeById(c.Param("id"))
 		if err != nil {
 			return errorResponse(http.StatusNotFound, "Recipe not found", nil, c)

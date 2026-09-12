@@ -16,6 +16,9 @@ type Translator struct {
 
 type TranslatorConfig struct {
 	ApiKey string
+	// Locales is a comma-separated list of BCP 47 tags the API translates
+	// recipes into on write. Parsed and validated in config.NewConfig.
+	Locales string
 }
 
 func New(cfg *TranslatorConfig) (*Translator, error) {

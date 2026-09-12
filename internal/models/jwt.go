@@ -15,22 +15,11 @@ type RefreshResponse struct {
 	ExpiresAt   time.Time `json:"expires_at"`
 }
 
-type AccessJwt struct {
+// TokenClaims is the payload of every JWT the API issues (access, refresh,
+// reset). The Purpose field distinguishes them and is checked on decode.
+type TokenClaims struct {
 	UserId  string `json:"id"`
 	Admin   bool   `json:"admin"`
-	Purpose string `json:"purpose"`
-	jwt.RegisteredClaims
-}
-
-type RefreshJwt struct {
-	UserId  string `json:"id"`
-	Admin   bool   `json:"admin"`
-	Purpose string `json:"purpose"`
-	jwt.RegisteredClaims
-}
-
-type ResetJwt struct {
-	UserId  string `json:"id"`
 	Purpose string `json:"purpose"`
 	jwt.RegisteredClaims
 }
