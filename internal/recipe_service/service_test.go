@@ -58,10 +58,8 @@ func (f *fakeStore) AddLocaleRecipe(recipe models.Recipe, locale string) (models
 	}
 	return recipe, nil
 }
-func (f *fakeStore) DeleteRecipeById(string) (models.RecipeDB, error)           { return models.RecipeDB{}, nil }
-func (f *fakeStore) DeleteLocalizedRecipesByID(context.Context, string) error   { return nil }
-func (f *fakeStore) TranslationBackfillCompleted(context.Context) (bool, error) { return false, nil }
-func (f *fakeStore) MarkTranslationBackfillCompleted(context.Context) error     { return nil }
+func (f *fakeStore) DeleteRecipeById(string) (models.RecipeDB, error)         { return models.RecipeDB{}, nil }
+func (f *fakeStore) DeleteLocalizedRecipesByID(context.Context, string) error { return nil }
 
 type fakeTranslator struct {
 	translateFn func(recipe models.Recipe, to string) (models.Recipe, error)

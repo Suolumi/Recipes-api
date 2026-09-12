@@ -28,10 +28,8 @@ const (
 	maxStepDescriptionLength = 5000
 
 	// translateConcurrency caps how many recipes are being translated at once
-	// across all detached write-path and backfill work.
+	// across all detached write-path work.
 	translateConcurrency = 4
-
-	backfillPageSize = 100
 )
 
 // translateBackoffs is the wait before each attempt when translating one locale;
@@ -63,8 +61,6 @@ type Store interface {
 	AddLocaleRecipe(recipe models.Recipe, locale string) (models.Recipe, error)
 	DeleteRecipeById(id string) (models.RecipeDB, error)
 	DeleteLocalizedRecipesByID(ctx context.Context, id string) error
-	TranslationBackfillCompleted(ctx context.Context) (bool, error)
-	MarkTranslationBackfillCompleted(ctx context.Context) error
 }
 
 // Translator is the slice of *translator.Translator the service needs. A nil

@@ -15,7 +15,7 @@ import (
 	"recipes/internal/models"
 )
 
-func TestTranslationsMigrationAndSearch(t *testing.T) {
+func TestGetRecipeDocumentsSearchesLocalizedTitle(t *testing.T) {
 	databaseName := "Recipes_test_" + primitive.NewObjectID().Hex()
 	db, err := mongorepo.New(&config.DatabaseConfig{
 		DefaultAddr: "mongodb://localhost:27017",
@@ -37,7 +37,7 @@ func TestTranslationsMigrationAndSearch(t *testing.T) {
 	authorID := primitive.NewObjectID()
 	users := db.RawDatabase().Collection("users")
 	_, err = users.InsertOne(ctx, bson.M{
-		"_id": authorID, "username": "migration-author", "email": "migration@example.test",
+		"_id": authorID, "username": "search-author", "email": "search@example.test",
 	})
 	require.NoError(t, err)
 
@@ -54,27 +54,9 @@ func TestTranslationsMigrationAndSearch(t *testing.T) {
 
 	translations := db.RawDatabase().Collection("recipe_translations")
 	_, err = translations.InsertOne(ctx, bson.M{
-		"_id": primitive.NewObjectID(), "recipe_id": recipeID, "locale": "fr", "title": "Existing translation",
+		"_id": primitive.NewObjectID(), "recipe_id": recipeID, "locale": "fr", "title": "Crêpes",
 	})
 	require.NoError(t, err)
-	_, err = db.RawDatabase().Collection("recipes_fr").InsertOne(ctx, bson.M{
-		"_id": recipeID, "author": authorID, "title": "Crêpes", "ingredients": bson.A{bson.M{"name": "farine"}},
-	})
-	require.NoError(t, err)
-
-	require.NoError(t, db.MigrateLegacyTranslations(ctx))
-	translated, err := db.GetRecipeByIdLocale(recipeID.Hex(), "fr")
-	require.NoError(t, err)
-	assert.Equal(t, "Crêpes", translated.Title)
-	require.NotNil(t, translated.Id)
-	assert.Equal(t, recipeID.Hex(), translated.Id.Hex())
-
-	_, err = db.RawDatabase().Collection("recipes_fr").UpdateOne(ctx, bson.M{"_id": recipeID}, bson.M{"$set": bson.M{"title": "Should remain unchanged"}})
-	require.NoError(t, err)
-	require.NoError(t, db.MigrateLegacyTranslations(ctx))
-	translated, err = db.GetRecipeByIdLocale(recipeID.Hex(), "fr")
-	require.NoError(t, err)
-	assert.Equal(t, "Crêpes", translated.Title)
 
 	localizedMatches, _, err := db.GetRecipeDocuments(models.GetRecipesRequest{Title: "crêpes", SearchLocale: "fr", Limit: 10})
 	require.NoError(t, err)

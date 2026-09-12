@@ -3,7 +3,6 @@ package recipe_service
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -100,97 +99,4 @@ func (s *Service) Retranslate(ctx context.Context, recipeID string) error {
 	}
 	s.scheduleTranslations(recipe)
 	return nil
-}
-
-// BackfillTranslations translates every existing recipe into the configured
-// target locales, once. It first repairs missing source_locale/source_hash on
-// the canonical document, which the read path's hash gate needs. The completion
-// marker is written only after a pass with no per-recipe failure, so transient
-// errors are retried on the next start.
-func (s *Service) BackfillTranslations(ctx context.Context) {
-	if !s.canTranslate() {
-		return
-	}
-	done, err := s.db.TranslationBackfillCompleted(ctx)
-	if err != nil {
-		utils.LogError("translation backfill: read marker", err)
-		return
-	}
-	if done {
-		return
-	}
-
-	clean := true
-	for offset := 0; ; offset += backfillPageSize {
-		if ctx.Err() != nil {
-			return
-		}
-		documents, _, err := s.db.GetRecipeDocuments(models.GetRecipesRequest{Limit: backfillPageSize, Offset: offset})
-		if err != nil {
-			utils.LogError("translation backfill: list recipes", err)
-			return
-		}
-		if len(documents) == 0 {
-			break
-		}
-		for _, document := range documents {
-			if err := s.backfillRecipe(ctx, document); err != nil {
-				clean = false
-				utils.LogError("translation backfill: recipe", err, "recipe", recipeIDHex(document))
-			}
-		}
-		if len(documents) < backfillPageSize {
-			break
-		}
-	}
-	if clean {
-		if err := s.db.MarkTranslationBackfillCompleted(ctx); err != nil {
-			utils.LogError("translation backfill: write marker", err)
-		}
-	}
-}
-
-func (s *Service) backfillRecipe(ctx context.Context, canonical models.Recipe) error {
-	if canonical.Id == nil {
-		return nil
-	}
-	if canonical.SourceLocale == "" || canonical.SourceHash == "" {
-		repaired, err := s.repairCanonicalMetadata(ctx, canonical)
-		if err != nil {
-			return err
-		}
-		canonical = repaired
-	}
-	return s.translateAll(canonical, false)
-}
-
-// repairCanonicalMetadata detects the source locale when missing and persists
-// source_locale + source_hash onto the canonical document.
-func (s *Service) repairCanonicalMetadata(ctx context.Context, canonical models.Recipe) (models.Recipe, error) {
-	if canonical.SourceLocale == "" {
-		detected, err := s.translator.GetRecipeLocale(canonical)
-		if err != nil {
-			return models.Recipe{}, fmt.Errorf("detect source locale: %w", err)
-		}
-		normalized, err := normalizeLocale(detected)
-		if err != nil || normalized == "" {
-			return models.Recipe{}, fmt.Errorf("detect source locale: unrecognized %q", detected)
-		}
-		canonical.SourceLocale = normalized
-	}
-	recipeDB := canonical.ToRecipeDB()
-	recipeDB.Locale = ""
-	recipeDB.SourceHash = sourceHash(recipeDB)
-	stored, err := s.db.ReplaceRecipeById(ctx, canonical.Id.Hex(), recipeDB)
-	if err != nil {
-		return models.Recipe{}, fmt.Errorf("persist canonical metadata: %w", err)
-	}
-	return stored, nil
-}
-
-func recipeIDHex(recipe models.Recipe) string {
-	if recipe.Id == nil {
-		return ""
-	}
-	return recipe.Id.Hex()
 }

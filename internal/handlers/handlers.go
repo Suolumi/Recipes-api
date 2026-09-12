@@ -60,10 +60,6 @@ func New(cfg *config.Config) (*Handlers, error) {
 		_ = db.Close(context.Background())
 		return nil, err
 	}
-	if err := db.MigrateLegacyTranslations(startupCtx); err != nil {
-		_ = db.Close(context.Background())
-		return nil, err
-	}
 
 	jm := jwt_manager.New(cfg.Jwt)
 
@@ -224,7 +220,6 @@ func (h *Handlers) RegisterEndpoints() {
 }
 
 func (h *Handlers) StartBackgroundMaintenance(ctx context.Context) {
-	go h.recipes.BackfillTranslations(ctx)
 	go func() {
 		references, err := h.db.ReferencedPictures(ctx)
 		if err != nil {

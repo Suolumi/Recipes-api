@@ -8,9 +8,6 @@ import (
 
 type Database interface {
 	EnsureIndexes(ctx context.Context) error
-	MigrateLegacyTranslations(ctx context.Context) error
-	TranslationBackfillCompleted(ctx context.Context) (bool, error)
-	MarkTranslationBackfillCompleted(ctx context.Context) error
 	Close(ctx context.Context) error
 	CreateUser(user models.UserDB) (models.UserDB, error)
 	GetUsers(username string, limit, offset int) ([]models.UserDB, int64, error)
