@@ -1,4 +1,4 @@
-# Recipes MCP server
+# Sauté MCP server
 
 The API exposes a stateless Streamable HTTP MCP server at `/mcp`. Point a remote MCP-capable agent at the public URL; for production that is:
 
@@ -12,7 +12,7 @@ The server implements the current `2026-07-28` MCP protocol only. It uses the of
 
 ## Getting a token
 
-While logged in to the recipes website, call the API once:
+While logged in to the Sauté website, call the API once:
 
 ```text
 POST /api/v1/mcp/token        (Authorization: Bearer <website access token>)

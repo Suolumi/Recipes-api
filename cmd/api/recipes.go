@@ -10,7 +10,7 @@ import (
 	"syscall"
 )
 
-// @title           Recipes API Swagger
+// @title           Sauté API Swagger
 // @version         1.0
 // @description     Swagger
 

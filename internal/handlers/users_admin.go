@@ -2,8 +2,6 @@ package handlers
 
 import (
 	"errors"
-	"github.com/labstack/echo/v4"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,6 +10,9 @@ import (
 	"recipes/internal/jwt_manager"
 	"recipes/internal/models"
 	"recipes/internal/utils"
+
+	"github.com/labstack/echo/v4"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 // @Summary Get user by id
