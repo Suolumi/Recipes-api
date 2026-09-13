@@ -3,7 +3,7 @@
 The API exposes a stateless Streamable HTTP MCP server at `/mcp`. Point a remote MCP-capable agent at the public URL; for production that is:
 
 ```text
-https://recipes.suolumi.fr/mcp
+https://recipes-api.suolumi.fr/mcp
 ```
 
 Authentication is a bearer token: the agent sends `Authorization: Bearer <token>` on every request. A token is a per-user MCP access token (see **Getting a token**). It is scoped to MCP only and cannot be used as a REST JWT; a REST JWT cannot be used here either. Tokens carry the two scopes `recipes:read` and `recipes:write`. Changing the account password, or calling `DELETE /api/v1/mcp/token`, invalidates every outstanding MCP token for that account; deleting the account invalidates it as well.
@@ -34,7 +34,7 @@ This bumps the user's MCP auth version, so every token previously issued to them
 Set these environment variables in production:
 
 ```text
-RECIPES_MCP_PUBLICURL=https://recipes.suolumi.fr/mcp
+RECIPES_MCP_PUBLICURL=https://recipes-api.suolumi.fr/mcp
 RECIPES_MCP_JWTSECRET=<at-least-32-random-bytes>
 ```
 
