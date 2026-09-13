@@ -195,26 +195,54 @@ func buildRecipeFilterPipeline(parameters models.GetRecipesRequest) []bson.D {
 	pipeline = append(pipeline, recipeAuthorPipeline...)
 
 	if parameters.SearchLocale != "" && (parameters.Title != "" || len(parameters.Ingredients) > 0) {
-		translationMatch := bson.D{
-			{Key: "$expr", Value: bson.D{{Key: "$eq", Value: bson.A{"$recipe_id", "$$recipeID"}}}},
-			{Key: "locale", Value: parameters.SearchLocale},
-		}
+		// Search the recipe_translations row for search_locale when one
+		// exists. Otherwise, only fall back to the canonical fields when the
+		// recipe's own source_locale IS search_locale — a translation row
+		// never exists for a recipe's own source locale (translating a
+		// language into itself is skipped, see targetLocalesFor), so without
+		// this narrow fallback a same-locale recipe would wrongly drop out
+		// of search. A recipe in a different, not-yet-translated (or never
+		// configured) locale must NOT match on its unrelated-language
+		// canonical text — it should simply not show up until it has an
+		// actual translation into search_locale.
+		pipeline = append(pipeline, bson.D{{Key: "$lookup", Value: bson.D{
+			{Key: "from", Value: translationsCollection},
+			{Key: "let", Value: bson.D{{Key: "recipeID", Value: "$_id"}}},
+			{Key: "pipeline", Value: mongo.Pipeline{{{Key: "$match", Value: bson.D{
+				{Key: "$expr", Value: bson.D{{Key: "$eq", Value: bson.A{"$recipe_id", "$$recipeID"}}}},
+				{Key: "locale", Value: parameters.SearchLocale},
+			}}}}},
+			{Key: "as", Value: "search_translation"},
+		}}}, bson.D{{Key: "$addFields", Value: bson.D{
+			{Key: "search_has_translation", Value: bson.D{{Key: "$gt", Value: bson.A{
+				bson.D{{Key: "$size", Value: "$search_translation"}}, 0,
+			}}}},
+			{Key: "search_own_locale", Value: bson.D{{Key: "$eq", Value: bson.A{"$source_locale", parameters.SearchLocale}}}},
+		}}}, bson.D{{Key: "$match", Value: bson.D{{Key: "$expr", Value: bson.D{
+			{Key: "$or", Value: bson.A{"$search_has_translation", "$search_own_locale"}},
+		}}}}}, bson.D{{Key: "$addFields", Value: bson.D{
+			{Key: "search_title", Value: bson.D{{Key: "$cond", Value: bson.D{
+				{Key: "if", Value: "$search_has_translation"},
+				{Key: "then", Value: bson.D{{Key: "$first", Value: "$search_translation.title"}}},
+				{Key: "else", Value: "$title"},
+			}}}},
+			{Key: "search_ingredients", Value: bson.D{{Key: "$cond", Value: bson.D{
+				{Key: "if", Value: "$search_has_translation"},
+				{Key: "then", Value: bson.D{{Key: "$first", Value: "$search_translation.ingredients"}}},
+				{Key: "else", Value: "$ingredients"},
+			}}}},
+		}}})
 		if parameters.Title != "" {
-			translationMatch = append(translationMatch, bson.E{Key: "title", Value: primitive.Regex{Pattern: regexp.QuoteMeta(parameters.Title), Options: "i"}})
+			pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.D{{Key: "search_title", Value: primitive.Regex{Pattern: regexp.QuoteMeta(parameters.Title), Options: "i"}}}}})
 		}
 		if len(parameters.Ingredients) > 0 {
 			ingredients := make([]interface{}, 0, len(parameters.Ingredients))
 			for _, ingredient := range parameters.Ingredients {
 				ingredients = append(ingredients, primitive.Regex{Pattern: regexp.QuoteMeta(ingredient), Options: "i"})
 			}
-			translationMatch = append(translationMatch, bson.E{Key: "ingredients.name", Value: bson.M{"$all": ingredients}})
+			pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.D{{Key: "search_ingredients.name", Value: bson.M{"$all": ingredients}}}}})
 		}
-		pipeline = append(pipeline, bson.D{{Key: "$lookup", Value: bson.D{
-			{Key: "from", Value: translationsCollection},
-			{Key: "let", Value: bson.D{{Key: "recipeID", Value: "$_id"}}},
-			{Key: "pipeline", Value: mongo.Pipeline{{{Key: "$match", Value: translationMatch}}}},
-			{Key: "as", Value: "translation_match"},
-		}}}, bson.D{{Key: "$match", Value: bson.D{{Key: "translation_match.0", Value: bson.D{{Key: "$exists", Value: true}}}}}}, bson.D{{Key: "$unset", Value: "translation_match"}})
+		pipeline = append(pipeline, bson.D{{Key: "$unset", Value: bson.A{"search_translation", "search_has_translation", "search_own_locale", "search_title", "search_ingredients"}}})
 	} else if parameters.Title != "" {
 		pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.D{{Key: "title", Value: primitive.Regex{Pattern: regexp.QuoteMeta(parameters.Title), Options: "i"}}}}})
 	}

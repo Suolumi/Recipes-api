@@ -50,6 +50,17 @@ func BindQuery(c echo.Context, i interface{}) error {
 		fieldType := typ.Field(i)
 		// Split to remove ,omitempty
 		queryName := strings.Split(fieldType.Tag.Get("query"), ",")[0]
+
+		if field.Kind() == reflect.Slice {
+			queryValues := c.QueryParams()[queryName]
+			if len(queryValues) > 0 && field.CanSet() {
+				if err := setStringSliceField(field, queryValues); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+
 		queryValue := c.QueryParam(queryName)
 
 		if queryValue != "" && field.CanSet() {

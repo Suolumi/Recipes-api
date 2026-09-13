@@ -103,6 +103,18 @@ func setDuration(field reflect.Value, envValue string) error {
 	return nil
 }
 
+func setStringSliceField(field reflect.Value, values []string) error {
+	if field.Type().Elem().Kind() != reflect.String {
+		return fmt.Errorf("unsupported slice element type: %s", field.Type().Elem().String())
+	}
+	slice := reflect.MakeSlice(field.Type(), len(values), len(values))
+	for i, v := range values {
+		slice.Index(i).SetString(v)
+	}
+	field.Set(slice)
+	return nil
+}
+
 func LoadConfigFromEnv(cfg interface{}, prefix ...string) error {
 	_ = godotenv.Load()
 	path := strings.Join(prefix, "_") + "_"
