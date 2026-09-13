@@ -183,6 +183,7 @@ type Ingredient struct {
 	Name     string  `bson:"name,omitempty" json:"name" jsonschema:"Ingredient name, e.g. 'Egg' or 'Thyme'"`
 	Quantity float64 `bson:"quantity,omitempty" json:"quantity" jsonschema:"Numeric amount, e.g. 3 or 0.5"`
 	Unit     string  `bson:"unit,omitempty" json:"unit" jsonschema:"Optional unit shown between quantity and name. Leave empty for a bare count, e.g. quantity 3 + name 'Egg' renders as '3 Egg'. Set it for a unit of measure or descriptor, e.g. quantity 3 + unit 'leaves' + name 'Thyme' renders as '3 leaves - Thyme'"`
+	Label    string  `bson:"label,omitempty" json:"label" jsonschema:"Optional section heading grouping this ingredient with others that share the exact same label, e.g. 'For the dough' or 'For the filling'. Leave empty for ingredients that don't belong to a named section. Reuse the identical label text (same wording and case) on every ingredient meant to share a section - matching is normalized server-side but exact reuse is still the reliable way to keep a group together."`
 }
 
 type Step struct {

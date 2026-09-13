@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -386,5 +387,63 @@ func TestDeleteAllowsRecipeWithoutFavorites(t *testing.T) {
 	}
 	if store.deleteRecipeById != 1 {
 		t.Fatalf("DeleteRecipeById called %d times, want 1", store.deleteRecipeById)
+	}
+}
+
+func validRecipeDB(ingredients []models.Ingredient) models.RecipeDB {
+	return models.RecipeDB{
+		Title:       "Title",
+		Description: "Description",
+		Quantity:    1,
+		Kind:        models.RecipeKinds[0],
+		Ingredients: ingredients,
+		Steps:       []models.Step{{Description: "Do it"}},
+	}
+}
+
+func TestValidateRecipeTrimsIngredientLabel(t *testing.T) {
+	recipe := validRecipeDB([]models.Ingredient{{Name: "Flour", Label: "  For the dough  "}})
+
+	if err := validateRecipe(&recipe); err != nil {
+		t.Fatalf("validateRecipe: %v", err)
+	}
+	if got := recipe.Ingredients[0].Label; got != "For the dough" {
+		t.Fatalf("Label = %q, want %q", got, "For the dough")
+	}
+}
+
+func TestValidateRecipeCanonicalizesLabelCasing(t *testing.T) {
+	recipe := validRecipeDB([]models.Ingredient{
+		{Name: "Flour", Label: "For the Dough"},
+		{Name: "Egg", Label: "for the dough"},
+		{Name: "Apple", Label: "For The DOUGH"},
+	})
+
+	if err := validateRecipe(&recipe); err != nil {
+		t.Fatalf("validateRecipe: %v", err)
+	}
+	for i, ingredient := range recipe.Ingredients {
+		if ingredient.Label != "For the Dough" {
+			t.Fatalf("Ingredients[%d].Label = %q, want canonical %q", i, ingredient.Label, "For the Dough")
+		}
+	}
+}
+
+func TestValidateRecipeRejectsOverlongLabel(t *testing.T) {
+	recipe := validRecipeDB([]models.Ingredient{{Name: "Flour", Label: strings.Repeat("a", maxIngredientFieldLength+1)}})
+
+	if err := validateRecipe(&recipe); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("validateRecipe err = %v, want ErrInvalid", err)
+	}
+}
+
+func TestValidateRecipeAllowsEmptyLabel(t *testing.T) {
+	recipe := validRecipeDB([]models.Ingredient{{Name: "Flour"}})
+
+	if err := validateRecipe(&recipe); err != nil {
+		t.Fatalf("validateRecipe: %v", err)
+	}
+	if recipe.Ingredients[0].Label != "" {
+		t.Fatalf("Label = %q, want empty", recipe.Ingredients[0].Label)
 	}
 }

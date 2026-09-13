@@ -135,15 +135,26 @@ func validateRecipe(recipe *models.RecipeDB) error {
 	if len(recipe.Ingredients) == 0 {
 		return fmt.Errorf("%w: at least one ingredient is required", ErrInvalid)
 	}
+	seenLabels := make(map[string]string)
 	for i := range recipe.Ingredients {
 		ingredient := &recipe.Ingredients[i]
 		ingredient.Name = strings.TrimSpace(ingredient.Name)
 		ingredient.Unit = strings.TrimSpace(ingredient.Unit)
-		if ingredient.Name == "" || len([]rune(ingredient.Name)) > maxIngredientFieldLength || len([]rune(ingredient.Unit)) > maxIngredientFieldLength {
+		ingredient.Label = strings.TrimSpace(ingredient.Label)
+		if ingredient.Name == "" || len([]rune(ingredient.Name)) > maxIngredientFieldLength ||
+			len([]rune(ingredient.Unit)) > maxIngredientFieldLength || len([]rune(ingredient.Label)) > maxIngredientFieldLength {
 			return fmt.Errorf("%w: invalid ingredient at index %d", ErrInvalid, i)
 		}
 		if ingredient.Quantity < 0 {
 			return fmt.Errorf("%w: ingredient quantity cannot be negative", ErrInvalid)
+		}
+		if ingredient.Label != "" {
+			key := strings.ToLower(ingredient.Label)
+			if canonical, ok := seenLabels[key]; ok {
+				ingredient.Label = canonical
+			} else {
+				seenLabels[key] = ingredient.Label
+			}
 		}
 	}
 	if len(recipe.Steps) == 0 {

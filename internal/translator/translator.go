@@ -36,12 +36,14 @@ func New(cfg *TranslatorConfig) (*Translator, error) {
 func (t *Translator) TranslateRecipe(recipe models.Recipe, to string) (models.Recipe, error) {
 	var ingredients []string
 	var ingredientsUnit []string
+	var ingredientsLabel []string
 	var stepTitles []string
 	var stepDesc []string
 
 	for _, ingredient := range recipe.Ingredients {
 		ingredients = append(ingredients, ingredient.Name)
 		ingredientsUnit = append(ingredientsUnit, ingredient.Unit)
+		ingredientsLabel = append(ingredientsLabel, ingredient.Label)
 	}
 	for _, step := range recipe.Steps {
 		stepTitles = append(stepTitles, step.Title)
@@ -56,6 +58,7 @@ func (t *Translator) TranslateRecipe(recipe models.Recipe, to string) (models.Re
 	input = append(input, stepTitles...)
 	input = append(input, stepDesc...)
 	input = append(input, ingredientsUnit...)
+	input = append(input, ingredientsLabel...)
 	baseTo := language.MustParse(to)
 	translations, err := t.client.Translate(context.TODO(), input, baseTo, &translate.Options{
 		Format: translate.Text,
@@ -67,12 +70,18 @@ func (t *Translator) TranslateRecipe(recipe models.Recipe, to string) (models.Re
 
 	var ing []models.Ingredient
 	ingName := translations[2 : 2+len(ingredients)]
-	ingUnit := translations[2+len(ingredients)+len(stepTitles)+len(stepDesc):]
+	ingUnit := translations[2+len(ingredients)+len(stepTitles)+len(stepDesc) : 2+len(ingredients)+len(stepTitles)+len(stepDesc)+len(ingredientsUnit)]
+	ingLabel := translations[2+len(ingredients)+len(stepTitles)+len(stepDesc)+len(ingredientsUnit):]
 	for i, ingredient := range recipe.Ingredients {
+		label := ""
+		if ingredient.Label != "" {
+			label = ingLabel[i].Text
+		}
 		ing = append(ing, models.Ingredient{
 			Name:     ingName[i].Text,
 			Quantity: ingredient.Quantity,
 			Unit:     ingUnit[i].Text,
+			Label:    label,
 		})
 	}
 	var st []models.Step
