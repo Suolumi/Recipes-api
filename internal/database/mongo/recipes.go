@@ -274,11 +274,20 @@ func buildRecipeSortStages(parameters models.GetRecipesRequest) []bson.D {
 
 	var stages []bson.D
 	differenceFields := bson.A{}
+	// preparation_time/cooking_time/resting_time are plain ints with
+	// `omitempty` bson tags, so a zero-minute value is stored as a missing
+	// field rather than 0. $add/$subtract return null (not 0) for a missing
+	// field, and null sorts before every real number - without $ifNull, any
+	// recipe missing one of these fields would always sort first regardless
+	// of actual closeness to the target.
+	zeroIfMissing := func(field string) bson.D {
+		return bson.D{{Key: "$ifNull", Value: bson.A{field, 0}}}
+	}
 	if parameters.PreparationTime != 0 {
 		stages = append(stages, bson.D{{Key: "$addFields", Value: bson.D{
 			{Key: "diffPrepTime", Value: bson.D{
 				{Key: "$abs", Value: bson.A{
-					bson.D{{Key: "$subtract", Value: bson.A{"$preparation_time", parameters.PreparationTime}}},
+					bson.D{{Key: "$subtract", Value: bson.A{zeroIfMissing("$preparation_time"), parameters.PreparationTime}}},
 				}},
 			}},
 		}}})
@@ -289,7 +298,11 @@ func buildRecipeSortStages(parameters models.GetRecipesRequest) []bson.D {
 			{Key: "diffTotalTime", Value: bson.D{
 				{Key: "$abs", Value: bson.A{
 					bson.D{{Key: "$subtract", Value: bson.A{
-						bson.D{{Key: "$add", Value: bson.A{"$preparation_time", "$cooking_time", "$resting_time"}}},
+						bson.D{{Key: "$add", Value: bson.A{
+							zeroIfMissing("$preparation_time"),
+							zeroIfMissing("$cooking_time"),
+							zeroIfMissing("$resting_time"),
+						}}},
 						parameters.TotalTime,
 					}}},
 				}},
