@@ -56,11 +56,17 @@ type Store interface {
 	GetRecipeByIdForAuthor(ctx context.Context, id, authorID string) (models.Recipe, error)
 	GetRecipeByIdLocale(id string, locale string) (models.Recipe, error)
 	GetRecipeDocuments(parameters models.GetRecipesRequest) ([]models.Recipe, int64, error)
+	GetRecipeDocumentsBoosted(ctx context.Context, userID string, parameters models.GetRecipesRequest) (favorited, rest []models.Recipe, total int64, err error)
 	GetRecipesByAuthor(ctx context.Context, authorID, cursor string, limit int) ([]models.Recipe, int64, error)
 	GetTranslationsByRecipeIDs(ctx context.Context, ids []string, locale string) (map[string]models.Recipe, error)
 	AddLocaleRecipe(recipe models.Recipe, locale string) (models.Recipe, error)
 	DeleteRecipeById(id string) (models.RecipeDB, error)
 	DeleteLocalizedRecipesByID(ctx context.Context, id string) error
+
+	AddFavorite(ctx context.Context, userID, recipeID string) error
+	RemoveFavorite(ctx context.Context, userID, recipeID string) error
+	DeleteFavoritesByRecipeID(ctx context.Context, recipeID string) error
+	GetFavoriteInfo(ctx context.Context, ids []string, userID string) (map[string]models.FavoriteInfo, error)
 }
 
 // Translator is the slice of *translator.Translator the service needs. A nil
@@ -368,7 +374,7 @@ func (s *Service) GetForUser(ctx context.Context, recipeID, userID, locale strin
 	return s.localize(recipe, locale), nil
 }
 
-func (s *Service) Get(ctx context.Context, recipeID, locale string) (models.Recipe, error) {
+func (s *Service) Get(ctx context.Context, recipeID, locale, userID string) (models.Recipe, error) {
 	if _, err := primitive.ObjectIDFromHex(recipeID); err != nil {
 		return models.Recipe{}, ErrNotFound
 	}
@@ -383,7 +389,78 @@ func (s *Service) Get(ctx context.Context, recipeID, locale string) (models.Reci
 		}
 		return models.Recipe{}, err
 	}
-	return s.localize(recipe, locale), nil
+	localized := s.localize(recipe, locale)
+	s.decorateFavorite(ctx, &localized, userID)
+	return localized, nil
+}
+
+// AddFavorite marks recipeID as favorited by userID; a no-op if it already is.
+func (s *Service) AddFavorite(ctx context.Context, userID, recipeID string) error {
+	if _, err := primitive.ObjectIDFromHex(recipeID); err != nil {
+		return ErrNotFound
+	}
+	if _, err := s.db.GetRecipeById(recipeID); err != nil {
+		if errors.Is(err, mongorepo.NotFoundError) {
+			return ErrNotFound
+		}
+		return err
+	}
+	return s.db.AddFavorite(ctx, userID, recipeID)
+}
+
+// RemoveFavorite un-favorites recipeID for userID; a no-op if it wasn't
+// favorited (or no longer exists).
+func (s *Service) RemoveFavorite(ctx context.Context, userID, recipeID string) error {
+	if _, err := primitive.ObjectIDFromHex(recipeID); err != nil {
+		return ErrNotFound
+	}
+	return s.db.RemoveFavorite(ctx, userID, recipeID)
+}
+
+// decorateFavorite stamps Favorite/FavoriteCount onto recipe. userID may be
+// empty (anonymous request); lookup failures are logged and leave the
+// zero-value (not favorited, count 0) rather than failing the request.
+func (s *Service) decorateFavorite(ctx context.Context, recipe *models.Recipe, userID string) {
+	if recipe.Id == nil {
+		return
+	}
+	info, err := s.db.GetFavoriteInfo(ctx, []string{recipe.Id.Hex()}, userID)
+	if err != nil {
+		utils.LogError("could not load favorite info", err)
+		return
+	}
+	if fav, ok := info[recipe.Id.Hex()]; ok {
+		recipe.Favorite = fav.Favorited
+		recipe.FavoriteCount = fav.Count
+	}
+}
+
+// decorateFavoritePreviews is decorateFavorite for a page of previews, fetched
+// in one batched lookup.
+func (s *Service) decorateFavoritePreviews(ctx context.Context, previews []models.RecipePreview, userID string) {
+	ids := make([]string, 0, len(previews))
+	for _, preview := range previews {
+		if preview.Id != nil {
+			ids = append(ids, preview.Id.Hex())
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	info, err := s.db.GetFavoriteInfo(ctx, ids, userID)
+	if err != nil {
+		utils.LogError("could not load favorite info", err)
+		return
+	}
+	for i := range previews {
+		if previews[i].Id == nil {
+			continue
+		}
+		if fav, ok := info[previews[i].Id.Hex()]; ok {
+			previews[i].Favorite = fav.Favorited
+			previews[i].FavoriteCount = fav.Count
+		}
+	}
 }
 
 func sameBaseLocale(left, right string) bool {
@@ -429,7 +506,13 @@ func (s *Service) localize(canonical models.Recipe, requested string) models.Rec
 	return pickTranslation(canonical, translation, requested, err == nil)
 }
 
-func (s *Service) List(ctx context.Context, parameters models.GetRecipesRequest) ([]models.RecipePreview, int64, error) {
+// List returns a page of recipes matching parameters. userID may be empty for
+// an anonymous request; when non-empty, results are decorated with per-user
+// favorite status, and if parameters.Favorite is set, every recipe userID has
+// favorited (matching the filters) is returned first, unpaginated, ahead of a
+// normal paginated page of the non-favorited remainder — see
+// Store.GetRecipeDocumentsBoosted.
+func (s *Service) List(ctx context.Context, parameters models.GetRecipesRequest, userID string) ([]models.RecipePreview, int64, error) {
 	locale, err := normalizeLocale(parameters.Locale)
 	if err != nil {
 		return nil, 0, err
@@ -440,11 +523,26 @@ func (s *Service) List(ctx context.Context, parameters models.GetRecipesRequest)
 	}
 	parameters.Locale = locale
 	parameters.SearchLocale = searchLocale
-	documents, count, err := s.db.GetRecipeDocuments(parameters)
-	if err != nil {
-		return nil, 0, err
+
+	var documents []models.Recipe
+	var count int64
+	if parameters.Favorite && userID != "" {
+		favorited, rest, total, err := s.db.GetRecipeDocumentsBoosted(ctx, userID, parameters)
+		if err != nil {
+			return nil, 0, err
+		}
+		documents = append(favorited, rest...)
+		count = total
+	} else {
+		documents, count, err = s.db.GetRecipeDocuments(parameters)
+		if err != nil {
+			return nil, 0, err
+		}
 	}
-	return s.localizePreviews(ctx, documents, parameters.Locale), count, nil
+
+	previews := s.localizePreviews(ctx, documents, parameters.Locale)
+	s.decorateFavoritePreviews(ctx, previews, userID)
+	return previews, count, nil
 }
 
 func (s *Service) ListForUser(ctx context.Context, userID, cursor string, limit int, locale string) ([]models.RecipePreview, int64, string, error) {
@@ -519,5 +617,6 @@ func (s *Service) Delete(ctx context.Context, recipeID string) (models.RecipeDB,
 		_ = images_manager.Remove(s.imageDir, picture)
 	}
 	_ = s.db.DeleteLocalizedRecipesByID(ctx, recipeID)
+	_ = s.db.DeleteFavoritesByRecipeID(ctx, recipeID)
 	return deleted, nil
 }

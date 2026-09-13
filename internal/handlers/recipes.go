@@ -118,6 +118,21 @@ func (h *Handlers) CreateRecipe(c echo.Context) error {
 	return c.JSON(http.StatusCreated, recipe)
 }
 
+// optionalUserID returns the authenticated user's id from a bearer access
+// token, or "" when absent or invalid. Used on routes that stay open to
+// anonymous requests but decorate the response when a user is known.
+func (h *Handlers) optionalUserID(c echo.Context) string {
+	token, ok := strings.CutPrefix(c.Request().Header.Get(echo.HeaderAuthorization), "Bearer ")
+	if !ok || token == "" {
+		return ""
+	}
+	claims, err := jwt_manager.DecodeJWT[models.TokenClaims](h.jm.AccessSecret, token, jwt_manager.PurposeAccess)
+	if err != nil {
+		return ""
+	}
+	return claims.UserId
+}
+
 func (h *Handlers) GetRecipes(c echo.Context) error {
 	for _, name := range []string{"locale", "search_locale"} {
 		if len(c.QueryParams()[name]) > 1 {
@@ -134,7 +149,7 @@ func (h *Handlers) GetRecipes(c echo.Context) error {
 	if body.Limit < 0 || body.Limit > 100 || body.Offset < 0 {
 		return errorResponse(http.StatusBadRequest, "limit must be between 0 and 100 and offset must not be negative", nil, c)
 	}
-	recipes, count, err := h.recipes.List(c.Request().Context(), body)
+	recipes, count, err := h.recipes.List(c.Request().Context(), body, h.optionalUserID(c))
 	if err != nil {
 		return recipeServiceError(err, c)
 	}
@@ -148,11 +163,32 @@ func (h *Handlers) GetRecipe(c echo.Context) error {
 	if len(c.QueryParams()["locale"]) > 1 {
 		return errorResponse(http.StatusBadRequest, "locale may be specified only once", nil, c)
 	}
-	recipe, err := h.recipes.Get(c.Request().Context(), c.Param("id"), c.QueryParam("locale"))
+	recipe, err := h.recipes.Get(c.Request().Context(), c.Param("id"), c.QueryParam("locale"), h.optionalUserID(c))
 	if err != nil {
 		return recipeServiceError(err, c)
 	}
 	return c.JSON(http.StatusOK, recipe)
+}
+
+// FavoriteRecipe marks the recipe as favorited by the authenticated user.
+// Idempotent: favoriting an already-favorited recipe succeeds without effect.
+func (h *Handlers) FavoriteRecipe(c echo.Context) error {
+	jwt := jwt_manager.GetJwt[*models.TokenClaims](c)
+	if err := h.recipes.AddFavorite(c.Request().Context(), jwt.UserId, c.Param("id")); err != nil {
+		return recipeServiceError(err, c)
+	}
+	return messageResponse(http.StatusOK, "Recipe favorited", c)
+}
+
+// UnfavoriteRecipe removes the authenticated user's favorite on the recipe.
+// Idempotent: un-favoriting a recipe that wasn't favorited succeeds without
+// effect.
+func (h *Handlers) UnfavoriteRecipe(c echo.Context) error {
+	jwt := jwt_manager.GetJwt[*models.TokenClaims](c)
+	if err := h.recipes.RemoveFavorite(c.Request().Context(), jwt.UserId, c.Param("id")); err != nil {
+		return recipeServiceError(err, c)
+	}
+	return messageResponse(http.StatusOK, "Recipe unfavorited", c)
 }
 
 func (h *Handlers) UpdateRecipe(c echo.Context) error {

@@ -17,6 +17,7 @@ type GetRecipesRequest struct {
 	Kind            RecipeKind `query:"kind,omitempty"`
 	Locale          string     `query:"locale,omitempty"`
 	SearchLocale    string     `query:"search_locale,omitempty"`
+	Favorite        bool       `query:"favorite,omitempty"`
 }
 
 type GetRecipesResponse struct {
@@ -110,6 +111,11 @@ type Recipe struct {
 	SourceLocale    string              `bson:"source_locale,omitempty" json:"source_locale,omitempty"`
 	Locale          string              `bson:"locale,omitempty" json:"locale,omitempty"`
 	SourceHash      string              `bson:"source_hash,omitempty" json:"-"`
+	// Favorite and FavoriteCount are stamped on after fetch (see
+	// recipe_service.decorateFavorite); they never come from the recipe or
+	// translation document itself, hence bson:"-".
+	Favorite      bool  `bson:"-" json:"favorite"`
+	FavoriteCount int64 `bson:"-" json:"favorite_count"`
 }
 
 // MarshalJSON ensures a recipe with no pictures serializes `pictures` as `[]`
@@ -158,6 +164,8 @@ type RecipePreview struct {
 	Pictures        []string            `bson:"pictures,omitempty" json:"pictures"`
 	SourceLocale    string              `bson:"source_locale,omitempty" json:"source_locale,omitempty"`
 	Locale          string              `bson:"locale,omitempty" json:"locale,omitempty"`
+	Favorite        bool                `bson:"-" json:"favorite"`
+	FavoriteCount   int64               `bson:"-" json:"favorite_count"`
 }
 
 // MarshalJSON ensures `pictures` serializes as `[]` rather than `null`; see

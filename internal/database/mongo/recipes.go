@@ -187,7 +187,9 @@ func (c *Client) DeleteRecipeById(id string) (models.RecipeDB, error) {
 	return recipe, nil
 }
 
-func (c *Client) GetRecipeDocuments(parameters models.GetRecipesRequest) ([]models.Recipe, int64, error) {
+// buildRecipeFilterPipeline returns the $lookup(author) plus every filter
+// stage for parameters, before any count/sort/skip/limit stage is appended.
+func buildRecipeFilterPipeline(parameters models.GetRecipesRequest) []bson.D {
 	var pipeline []bson.D
 
 	pipeline = append(pipeline, recipeAuthorPipeline...)
@@ -231,6 +233,56 @@ func (c *Client) GetRecipeDocuments(parameters models.GetRecipesRequest) ([]mode
 		pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.D{{Key: "ingredients.name", Value: bson.M{"$all": ingredients}}}}})
 	}
 
+	return pipeline
+}
+
+// buildRecipeSortStages returns the sort stage(s) for parameters: either the
+// plain newest-first sort, or (when a preparation/total time target is given)
+// a sort by closeness to that target, ties broken newest-first.
+func buildRecipeSortStages(parameters models.GetRecipesRequest) []bson.D {
+	if parameters.PreparationTime == 0 && parameters.TotalTime == 0 {
+		return []bson.D{{{Key: "$sort", Value: bson.D{{Key: "_id", Value: -1}}}}}
+	}
+
+	var stages []bson.D
+	differenceFields := bson.A{}
+	if parameters.PreparationTime != 0 {
+		stages = append(stages, bson.D{{Key: "$addFields", Value: bson.D{
+			{Key: "diffPrepTime", Value: bson.D{
+				{Key: "$abs", Value: bson.A{
+					bson.D{{Key: "$subtract", Value: bson.A{"$preparation_time", parameters.PreparationTime}}},
+				}},
+			}},
+		}}})
+		differenceFields = append(differenceFields, "$diffPrepTime")
+	}
+	if parameters.TotalTime != 0 {
+		stages = append(stages, bson.D{{Key: "$addFields", Value: bson.D{
+			{Key: "diffTotalTime", Value: bson.D{
+				{Key: "$abs", Value: bson.A{
+					bson.D{{Key: "$subtract", Value: bson.A{
+						bson.D{{Key: "$add", Value: bson.A{"$preparation_time", "$cooking_time", "$resting_time"}}},
+						parameters.TotalTime,
+					}}},
+				}},
+			}},
+		}}})
+		differenceFields = append(differenceFields, "$diffTotalTime")
+	}
+	stages = append(stages, bson.D{{Key: "$addFields", Value: bson.D{
+		{Key: "combinedDifference", Value: bson.D{
+			{Key: "$add", Value: differenceFields},
+		}},
+	}}}, bson.D{{Key: "$sort", Value: bson.D{
+		{Key: "combinedDifference", Value: 1},
+		{Key: "_id", Value: -1},
+	}}})
+	return stages
+}
+
+func (c *Client) GetRecipeDocuments(parameters models.GetRecipesRequest) ([]models.Recipe, int64, error) {
+	pipeline := buildRecipeFilterPipeline(parameters)
+
 	// Count total number of documents before sorting without limit and skip
 	cursor, err := c.db.Collection(recipesCollection).Aggregate(context.TODO(), append(slices.Clone(pipeline), bson.D{{Key: "$count", Value: "total"}}))
 	if err != nil {
@@ -248,42 +300,7 @@ func (c *Client) GetRecipeDocuments(parameters models.GetRecipesRequest) ([]mode
 		count = result.Total
 	}
 
-	if parameters.PreparationTime != 0 || parameters.TotalTime != 0 {
-		differenceFields := bson.A{}
-		if parameters.PreparationTime != 0 {
-			pipeline = append(pipeline, bson.D{{Key: "$addFields", Value: bson.D{
-				{Key: "diffPrepTime", Value: bson.D{
-					{Key: "$abs", Value: bson.A{
-						bson.D{{Key: "$subtract", Value: bson.A{"$preparation_time", parameters.PreparationTime}}},
-					}},
-				}},
-			}}})
-			differenceFields = append(differenceFields, "$diffPrepTime")
-		}
-		if parameters.TotalTime != 0 {
-			pipeline = append(pipeline, bson.D{{Key: "$addFields", Value: bson.D{
-				{Key: "diffTotalTime", Value: bson.D{
-					{Key: "$abs", Value: bson.A{
-						bson.D{{Key: "$subtract", Value: bson.A{
-							bson.D{{Key: "$add", Value: bson.A{"$preparation_time", "$cooking_time", "$resting_time"}}},
-							parameters.TotalTime,
-						}}},
-					}},
-				}},
-			}}})
-			differenceFields = append(differenceFields, "$diffTotalTime")
-		}
-		pipeline = append(pipeline, bson.D{{Key: "$addFields", Value: bson.D{
-			{Key: "combinedDifference", Value: bson.D{
-				{Key: "$add", Value: differenceFields},
-			}},
-		}}}, bson.D{{Key: "$sort", Value: bson.D{
-			{Key: "combinedDifference", Value: 1},
-			{Key: "_id", Value: -1},
-		}}})
-	} else {
-		pipeline = append(pipeline, bson.D{{Key: "$sort", Value: bson.D{{Key: "_id", Value: -1}}}})
-	}
+	pipeline = append(pipeline, buildRecipeSortStages(parameters)...)
 
 	// Apply limit and offset for pagination
 	if parameters.Offset != 0 {
@@ -302,6 +319,97 @@ func (c *Client) GetRecipeDocuments(parameters models.GetRecipesRequest) ([]mode
 
 	recipes, err := c.transformRecipe(cursor)
 	return recipes, count, err
+}
+
+// boostedFavoritesCap caps how many favorited-matching recipes
+// GetRecipeDocumentsBoosted returns in its unpaginated block, as a safety net
+// against an unbounded response for a pathologically large favorites list.
+const boostedFavoritesCap = 500
+
+// GetRecipeDocumentsBoosted partitions the recipes matching parameters into
+// every one userID has favorited (returned in full, up to boostedFavoritesCap,
+// only on the Offset == 0 call) and the remaining non-favorited matches
+// (paginated per parameters.Offset/Limit). Offset addresses the non-favorited
+// segment only: a caller pages through it by incrementing Offset over the
+// count of non-favorited items each page actually returned (favorited items
+// don't consume any of the offset budget), and never re-requests offset 0
+// mid-session — that's what makes favoriting/unfavoriting mid-scroll shift at
+// most the non-favorited tail once, instead of reshuffling everything above
+// the caller's current position.
+func (c *Client) GetRecipeDocumentsBoosted(ctx context.Context, userID string, parameters models.GetRecipesRequest) ([]models.Recipe, []models.Recipe, int64, error) {
+	favoriteIDs, err := c.favoritedRecipeIDs(ctx, userID)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+
+	base := buildRecipeFilterPipeline(parameters)
+	sortStages := buildRecipeSortStages(parameters)
+
+	countMatching := func(extra bson.D) (int64, error) {
+		pipeline := append(slices.Clone(base), extra, bson.D{{Key: "$count", Value: "total"}})
+		cursor, err := c.db.Collection(recipesCollection).Aggregate(ctx, pipeline)
+		if err != nil {
+			return 0, err
+		}
+		var result struct {
+			Total int64 `bson:"total"`
+		}
+		if cursor.Next(ctx) {
+			if err := cursor.Decode(&result); err != nil {
+				return 0, err
+			}
+		}
+		return result.Total, nil
+	}
+	fetchMatching := func(extra bson.D, skip, limit int) ([]models.Recipe, error) {
+		pipeline := append(slices.Clone(base), extra)
+		pipeline = append(pipeline, sortStages...)
+		if skip > 0 {
+			pipeline = append(pipeline, bson.D{{Key: "$skip", Value: skip}})
+		}
+		pipeline = append(pipeline, bson.D{{Key: "$limit", Value: limit}})
+		cursor, err := c.db.Collection(recipesCollection).Aggregate(ctx, pipeline)
+		if err != nil {
+			return nil, err
+		}
+		return c.transformRecipe(cursor)
+	}
+
+	inFavorites := bson.D{{Key: "$match", Value: bson.D{{Key: "_id", Value: bson.D{{Key: "$in", Value: favoriteIDs}}}}}}
+	notInFavorites := bson.D{{Key: "$match", Value: bson.D{{Key: "_id", Value: bson.D{{Key: "$nin", Value: favoriteIDs}}}}}}
+
+	favoritedCount, err := countMatching(inFavorites)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	restCount, err := countMatching(notInFavorites)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+
+	// The favorited block is only ever included on the first page (Offset ==
+	// 0): a caller pages through the non-favorited remainder by incrementing
+	// Offset over the count of non-favorited items each page actually
+	// returned, never re-requesting offset 0 mid-session, so returning the
+	// block again on later pages would just duplicate it.
+	var favorited []models.Recipe
+	if parameters.Offset == 0 {
+		favorited, err = fetchMatching(inFavorites, 0, boostedFavoritesCap)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+	}
+
+	limit := parameters.Limit
+	if limit == 0 {
+		limit = 15
+	}
+	rest, err := fetchMatching(notInFavorites, parameters.Offset, limit)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+
+	return favorited, rest, favoritedCount + restCount, nil
 }
 
 func (c *Client) GetRecipesByAuthor(ctx context.Context, authorID, cursorID string, limit int) ([]models.Recipe, int64, error) {

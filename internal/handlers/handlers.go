@@ -214,6 +214,8 @@ func (h *Handlers) RegisterEndpoints() {
 	protectedRouter.PATCH("/recipes/:id", h.UpdateRecipe, h.RecipeAuthorMiddleware, middleware.BodyLimit("90M"))
 	protectedRouter.DELETE("/recipes/:id", h.DeleteRecipe, h.RecipeAuthorMiddleware)
 	protectedRouter.POST("/recipes/:id/retranslate", h.RetranslateRecipe, adminMiddleware, authLimiter)
+	protectedRouter.POST("/recipes/:id/favorite", h.FavoriteRecipe)
+	protectedRouter.DELETE("/recipes/:id/favorite", h.UnfavoriteRecipe)
 
 	// Recipes images
 	unprotectedRouter.Static("/recipe-pictures", h.cfg.RecipeImageDir)

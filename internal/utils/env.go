@@ -54,10 +54,21 @@ func setField(field reflect.Value, envValue string) error {
 		field.SetString(envValue)
 	case reflect.Float32, reflect.Float64:
 		return setFloat(field, envValue)
+	case reflect.Bool:
+		return setBool(field, envValue)
 	default:
 		return fmt.Errorf("unsupported field type: %s", field.Type().String())
 	}
 
+	return nil
+}
+
+func setBool(field reflect.Value, value string) error {
+	boolValue, err := strconv.ParseBool(value)
+	if err != nil {
+		return err
+	}
+	field.SetBool(boolValue)
 	return nil
 }
 

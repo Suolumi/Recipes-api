@@ -28,5 +28,11 @@ func (c *Client) EnsureIndexes(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("create translation indexes: %w", err)
 	}
+	if _, err := c.db.Collection(favoritesCollection).Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "recipe", Value: 1}}, Options: options.Index().SetUnique(true).SetName("favorites_recipe_unique")},
+		{Keys: bson.D{{Key: "users", Value: 1}}, Options: options.Index().SetName("favorites_users")},
+	}); err != nil {
+		return fmt.Errorf("create favorite indexes: %w", err)
+	}
 	return nil
 }

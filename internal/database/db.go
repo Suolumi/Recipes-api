@@ -22,6 +22,7 @@ type Database interface {
 	CreateRecipe(authorId string, infos *models.CreateRecipe) (models.Recipe, error)
 	AddLocaleRecipe(recipe models.Recipe, locale string) (models.Recipe, error)
 	GetRecipeDocuments(parameters models.GetRecipesRequest) ([]models.Recipe, int64, error)
+	GetRecipeDocumentsBoosted(ctx context.Context, userID string, parameters models.GetRecipesRequest) (favorited, rest []models.Recipe, total int64, err error)
 	GetRecipesByAuthor(ctx context.Context, authorID, cursor string, limit int) ([]models.Recipe, int64, error)
 	GetRecipeById(id string) (models.Recipe, error)
 	GetRecipeByIdForAuthor(ctx context.Context, id, authorID string) (models.Recipe, error)
@@ -33,5 +34,11 @@ type Database interface {
 	DeleteRecipeById(id string) (models.RecipeDB, error)
 	DeleteLocalizedRecipesByID(ctx context.Context, id string) error
 	RecipeConflicts(recipe models.RecipeDB) (models.RecipeDB, error)
+
+	AddFavorite(ctx context.Context, userID, recipeID string) error
+	RemoveFavorite(ctx context.Context, userID, recipeID string) error
+	DeleteFavoritesByRecipeID(ctx context.Context, recipeID string) error
+	GetFavoriteInfo(ctx context.Context, ids []string, userID string) (map[string]models.FavoriteInfo, error)
+
 	RawDatabase() *mongodriver.Database
 }

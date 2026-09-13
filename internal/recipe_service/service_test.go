@@ -15,10 +15,14 @@ import (
 // fakeStore satisfies Store; only the methods a test needs are wired, the rest
 // return zero values.
 type fakeStore struct {
-	getRecipeByIdLocaleFn func(id, locale string) (models.Recipe, error)
-	addLocaleRecipeFn     func(recipe models.Recipe, locale string) (models.Recipe, error)
-	getRecipeByIdFn       func(id string) (models.Recipe, error)
-	getRecipeByIdLocale   int
+	getRecipeByIdLocaleFn       func(id, locale string) (models.Recipe, error)
+	addLocaleRecipeFn           func(recipe models.Recipe, locale string) (models.Recipe, error)
+	getRecipeByIdFn             func(id string) (models.Recipe, error)
+	getRecipeByIdLocale         int
+	getRecipeDocumentsFn        func(models.GetRecipesRequest) ([]models.Recipe, int64, error)
+	getRecipeDocumentsBoostedFn func(userID string, parameters models.GetRecipesRequest) ([]models.Recipe, []models.Recipe, int64, error)
+	getRecipeDocumentsBoosted   int
+	getFavoriteInfoFn           func(ids []string, userID string) (map[string]models.FavoriteInfo, error)
 }
 
 func (f *fakeStore) CreateRecipe(string, *models.CreateRecipe) (models.Recipe, error) {
@@ -43,8 +47,18 @@ func (f *fakeStore) GetRecipeByIdLocale(id string, locale string) (models.Recipe
 	}
 	return models.Recipe{}, errors.New("not found")
 }
-func (f *fakeStore) GetRecipeDocuments(models.GetRecipesRequest) ([]models.Recipe, int64, error) {
+func (f *fakeStore) GetRecipeDocuments(parameters models.GetRecipesRequest) ([]models.Recipe, int64, error) {
+	if f.getRecipeDocumentsFn != nil {
+		return f.getRecipeDocumentsFn(parameters)
+	}
 	return nil, 0, nil
+}
+func (f *fakeStore) GetRecipeDocumentsBoosted(_ context.Context, userID string, parameters models.GetRecipesRequest) ([]models.Recipe, []models.Recipe, int64, error) {
+	f.getRecipeDocumentsBoosted++
+	if f.getRecipeDocumentsBoostedFn != nil {
+		return f.getRecipeDocumentsBoostedFn(userID, parameters)
+	}
+	return nil, nil, 0, nil
 }
 func (f *fakeStore) GetRecipesByAuthor(context.Context, string, string, int) ([]models.Recipe, int64, error) {
 	return nil, 0, nil
@@ -60,6 +74,16 @@ func (f *fakeStore) AddLocaleRecipe(recipe models.Recipe, locale string) (models
 }
 func (f *fakeStore) DeleteRecipeById(string) (models.RecipeDB, error)         { return models.RecipeDB{}, nil }
 func (f *fakeStore) DeleteLocalizedRecipesByID(context.Context, string) error { return nil }
+
+func (f *fakeStore) AddFavorite(context.Context, string, string) error       { return nil }
+func (f *fakeStore) RemoveFavorite(context.Context, string, string) error    { return nil }
+func (f *fakeStore) DeleteFavoritesByRecipeID(context.Context, string) error { return nil }
+func (f *fakeStore) GetFavoriteInfo(_ context.Context, ids []string, userID string) (map[string]models.FavoriteInfo, error) {
+	if f.getFavoriteInfoFn != nil {
+		return f.getFavoriteInfoFn(ids, userID)
+	}
+	return map[string]models.FavoriteInfo{}, nil
+}
 
 type fakeTranslator struct {
 	translateFn func(recipe models.Recipe, to string) (models.Recipe, error)
@@ -226,5 +250,98 @@ func TestTranslateLocaleSkipsFreshRowWhenNotForced(t *testing.T) {
 	}
 	if translated {
 		t.Fatal("translator was called for an already-fresh row")
+	}
+}
+
+func TestGetDecoratesFavorite(t *testing.T) {
+	canonical := canonicalRecipe()
+	store := &fakeStore{
+		getRecipeByIdFn: func(string) (models.Recipe, error) { return canonical, nil },
+		getFavoriteInfoFn: func(ids []string, userID string) (map[string]models.FavoriteInfo, error) {
+			if len(ids) != 1 || ids[0] != canonical.Id.Hex() || userID != "user-1" {
+				t.Fatalf("GetFavoriteInfo called with ids=%v userID=%q", ids, userID)
+			}
+			return map[string]models.FavoriteInfo{canonical.Id.Hex(): {Count: 3, Favorited: true}}, nil
+		},
+	}
+	s := &Service{db: store}
+
+	got, err := s.Get(context.Background(), canonical.Id.Hex(), "", "user-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !got.Favorite || got.FavoriteCount != 3 {
+		t.Fatalf("got Favorite=%v FavoriteCount=%d, want true/3", got.Favorite, got.FavoriteCount)
+	}
+}
+
+func TestGetLeavesFavoriteZeroValueOnLookupError(t *testing.T) {
+	canonical := canonicalRecipe()
+	store := &fakeStore{
+		getRecipeByIdFn:   func(string) (models.Recipe, error) { return canonical, nil },
+		getFavoriteInfoFn: func([]string, string) (map[string]models.FavoriteInfo, error) { return nil, errors.New("boom") },
+	}
+	s := &Service{db: store}
+
+	got, err := s.Get(context.Background(), canonical.Id.Hex(), "", "user-1")
+	if err != nil {
+		t.Fatalf("Get: %v, want success despite favorite lookup failure", err)
+	}
+	if got.Favorite || got.FavoriteCount != 0 {
+		t.Fatalf("got Favorite=%v FavoriteCount=%d, want false/0", got.Favorite, got.FavoriteCount)
+	}
+}
+
+func TestListBoostedMergesFavoritedFirstAndDecorates(t *testing.T) {
+	favoritedID := primitive.NewObjectID()
+	restID := primitive.NewObjectID()
+	store := &fakeStore{
+		getRecipeDocumentsBoostedFn: func(userID string, parameters models.GetRecipesRequest) ([]models.Recipe, []models.Recipe, int64, error) {
+			if userID != "user-1" {
+				t.Fatalf("GetRecipeDocumentsBoosted userID = %q, want user-1", userID)
+			}
+			return []models.Recipe{{Id: &favoritedID, Title: "Favorited"}},
+				[]models.Recipe{{Id: &restID, Title: "Rest"}}, 5, nil
+		},
+		getFavoriteInfoFn: func(ids []string, userID string) (map[string]models.FavoriteInfo, error) {
+			return map[string]models.FavoriteInfo{
+				favoritedID.Hex(): {Count: 2, Favorited: true},
+				restID.Hex():      {Count: 0, Favorited: false},
+			}, nil
+		},
+	}
+	s := &Service{db: store}
+
+	previews, total, err := s.List(context.Background(), models.GetRecipesRequest{Favorite: true}, "user-1")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if total != 5 {
+		t.Fatalf("total = %d, want 5", total)
+	}
+	if len(previews) != 2 || previews[0].Id.Hex() != favoritedID.Hex() || previews[1].Id.Hex() != restID.Hex() {
+		t.Fatalf("previews = %+v, want [favorited, rest] in that order", previews)
+	}
+	if !previews[0].Favorite || previews[0].FavoriteCount != 2 {
+		t.Fatalf("favorited preview = %+v, want Favorite=true FavoriteCount=2", previews[0])
+	}
+	if previews[1].Favorite || previews[1].FavoriteCount != 0 {
+		t.Fatalf("rest preview = %+v, want Favorite=false FavoriteCount=0", previews[1])
+	}
+}
+
+func TestListIgnoresFavoriteFlagWhenAnonymous(t *testing.T) {
+	store := &fakeStore{
+		getRecipeDocumentsFn: func(models.GetRecipesRequest) ([]models.Recipe, int64, error) {
+			return nil, 0, nil
+		},
+	}
+	s := &Service{db: store}
+
+	if _, _, err := s.List(context.Background(), models.GetRecipesRequest{Favorite: true}, ""); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if store.getRecipeDocumentsBoosted != 0 {
+		t.Fatalf("GetRecipeDocumentsBoosted called %d times for an anonymous request, want 0", store.getRecipeDocumentsBoosted)
 	}
 }
