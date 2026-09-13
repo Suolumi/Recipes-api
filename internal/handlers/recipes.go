@@ -25,6 +25,8 @@ func recipeServiceError(err error, c echo.Context) error {
 		return errorResponse(http.StatusUnprocessableEntity, err.Error(), nil, c)
 	case errors.Is(err, recipe_service.ErrNotFound):
 		return errorResponse(http.StatusNotFound, "Recipe not found", nil, c)
+	case errors.Is(err, recipe_service.ErrHasFavorites):
+		return errorResponse(http.StatusConflict, "Recipe has favorites and cannot be deleted", nil, c)
 	default:
 		return errorResponse(http.StatusInternalServerError, "Could not process recipe", err, c)
 	}

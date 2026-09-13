@@ -37,8 +37,9 @@ const (
 var translateBackoffs = []time.Duration{time.Second, 4 * time.Second, 10 * time.Second}
 
 var (
-	ErrInvalid  = errors.New("invalid recipe")
-	ErrNotFound = errors.New("recipe not found")
+	ErrInvalid      = errors.New("invalid recipe")
+	ErrNotFound     = errors.New("recipe not found")
+	ErrHasFavorites = errors.New("recipe has favorites")
 )
 
 type PictureUpload struct {
@@ -605,6 +606,13 @@ func (s *Service) localizePreviews(ctx context.Context, documents []models.Recip
 func (s *Service) Delete(ctx context.Context, recipeID string) (models.RecipeDB, error) {
 	if _, err := primitive.ObjectIDFromHex(recipeID); err != nil {
 		return models.RecipeDB{}, ErrNotFound
+	}
+	favorites, err := s.db.GetFavoriteInfo(ctx, []string{recipeID}, "")
+	if err != nil {
+		return models.RecipeDB{}, err
+	}
+	if favorites[recipeID].Count > 0 {
+		return models.RecipeDB{}, ErrHasFavorites
 	}
 	deleted, err := s.db.DeleteRecipeById(recipeID)
 	if err != nil {

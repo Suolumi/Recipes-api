@@ -23,6 +23,8 @@ type fakeStore struct {
 	getRecipeDocumentsBoostedFn func(userID string, parameters models.GetRecipesRequest) ([]models.Recipe, []models.Recipe, int64, error)
 	getRecipeDocumentsBoosted   int
 	getFavoriteInfoFn           func(ids []string, userID string) (map[string]models.FavoriteInfo, error)
+	deleteRecipeByIdFn          func(id string) (models.RecipeDB, error)
+	deleteRecipeById            int
 }
 
 func (f *fakeStore) CreateRecipe(string, *models.CreateRecipe) (models.Recipe, error) {
@@ -72,7 +74,13 @@ func (f *fakeStore) AddLocaleRecipe(recipe models.Recipe, locale string) (models
 	}
 	return recipe, nil
 }
-func (f *fakeStore) DeleteRecipeById(string) (models.RecipeDB, error)         { return models.RecipeDB{}, nil }
+func (f *fakeStore) DeleteRecipeById(id string) (models.RecipeDB, error) {
+	f.deleteRecipeById++
+	if f.deleteRecipeByIdFn != nil {
+		return f.deleteRecipeByIdFn(id)
+	}
+	return models.RecipeDB{}, nil
+}
 func (f *fakeStore) DeleteLocalizedRecipesByID(context.Context, string) error { return nil }
 
 func (f *fakeStore) AddFavorite(context.Context, string, string) error       { return nil }
@@ -343,5 +351,40 @@ func TestListIgnoresFavoriteFlagWhenAnonymous(t *testing.T) {
 	}
 	if store.getRecipeDocumentsBoosted != 0 {
 		t.Fatalf("GetRecipeDocumentsBoosted called %d times for an anonymous request, want 0", store.getRecipeDocumentsBoosted)
+	}
+}
+
+func TestDeleteRejectsRecipeWithFavorites(t *testing.T) {
+	id := primitive.NewObjectID().Hex()
+	store := &fakeStore{
+		getFavoriteInfoFn: func(ids []string, userID string) (map[string]models.FavoriteInfo, error) {
+			return map[string]models.FavoriteInfo{id: {Count: 1}}, nil
+		},
+	}
+	s := &Service{db: store}
+
+	_, err := s.Delete(context.Background(), id)
+	if !errors.Is(err, ErrHasFavorites) {
+		t.Fatalf("Delete err = %v, want ErrHasFavorites", err)
+	}
+	if store.deleteRecipeById != 0 {
+		t.Fatalf("DeleteRecipeById called %d times, want 0", store.deleteRecipeById)
+	}
+}
+
+func TestDeleteAllowsRecipeWithoutFavorites(t *testing.T) {
+	id := primitive.NewObjectID().Hex()
+	store := &fakeStore{
+		getFavoriteInfoFn: func(ids []string, userID string) (map[string]models.FavoriteInfo, error) {
+			return map[string]models.FavoriteInfo{}, nil
+		},
+	}
+	s := &Service{db: store}
+
+	if _, err := s.Delete(context.Background(), id); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if store.deleteRecipeById != 1 {
+		t.Fatalf("DeleteRecipeById called %d times, want 1", store.deleteRecipeById)
 	}
 }
