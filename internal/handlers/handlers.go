@@ -133,7 +133,7 @@ func (h *Handlers) RegisterEndpoints() {
 	}))
 	h.e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
 		AllowOrigins:  []string{h.cfg.WebappUrl},
-		AllowHeaders:  []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization},
+		AllowHeaders:  []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization, "Idempotency-Key"},
 		AllowMethods:  []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions},
 		ExposeHeaders: []string{echo.HeaderXRequestID},
 	}))
