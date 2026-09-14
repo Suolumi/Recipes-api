@@ -63,11 +63,16 @@ type Store interface {
 	AddLocaleRecipe(recipe models.Recipe, locale string) (models.Recipe, error)
 	DeleteRecipeById(id string) (models.RecipeDB, error)
 	DeleteLocalizedRecipesByID(ctx context.Context, id string) error
+	GetOldestVariationID(ctx context.Context, rootID string) (*primitive.ObjectID, error)
+	RepointVariations(ctx context.Context, oldRootID, newRootID string) error
+	PromoteRecipeToRoot(ctx context.Context, id string) error
+	GetVariationCounts(ctx context.Context, rootIDs []string) (map[string]int64, error)
 
 	AddFavorite(ctx context.Context, userID, recipeID string) error
 	RemoveFavorite(ctx context.Context, userID, recipeID string) error
 	DeleteFavoritesByRecipeID(ctx context.Context, recipeID string) error
 	GetFavoriteInfo(ctx context.Context, ids []string, userID string) (map[string]models.FavoriteInfo, error)
+	GetFamilyFavoriteInfo(ctx context.Context, rootIDs []string, userID string) (map[string]models.FavoriteInfo, error)
 }
 
 // Translator is the slice of *translator.Translator the service needs. A nil
@@ -181,6 +186,7 @@ func sourceHash(recipe models.RecipeDB) string {
 	recipe.Author = nil
 	recipe.Locale = ""
 	recipe.SourceHash = ""
+	recipe.VariationOf = nil
 	data, _ := json.Marshal(recipe)
 	hash := sha256.Sum256(data)
 	return hex.EncodeToString(hash[:])
@@ -296,6 +302,22 @@ func (s *Service) Create(ctx context.Context, authorID string, input models.Crea
 		Title: input.Title, Description: input.Description, Quantity: input.Quantity, Kind: input.Kind,
 		PreparationTime: input.PreparationTime, CookingTime: input.CookingTime, RestingTime: input.RestingTime,
 		Ingredients: input.Ingredients, Steps: input.Steps, SourceLocale: input.SourceLocale,
+	}
+	if input.VariationOf != nil {
+		target, err := s.db.GetRecipeById(input.VariationOf.Hex())
+		if err != nil {
+			if errors.Is(err, mongorepo.NotFoundError) {
+				return models.Recipe{}, ErrNotFound
+			}
+			return models.Recipe{}, err
+		}
+		root := target.Id
+		// Always flatten to the target's own root - a variation never chains
+		// off another variation.
+		if target.VariationOf != nil {
+			root = target.VariationOf
+		}
+		recipeDB.VariationOf = root
 	}
 	if recipeDB.SourceLocale == "" && s.translator != nil {
 		detected, detectErr := s.translator.GetRecipeLocale(models.Recipe{Ingredients: recipeDB.Ingredients})
@@ -480,7 +502,13 @@ func (s *Service) GetForUser(ctx context.Context, recipeID, userID, locale strin
 		}
 		return models.Recipe{}, err
 	}
-	return s.localize(recipe, locale), nil
+	localized := s.localize(recipe, locale)
+	// GetForUser is an internal author-scoped fetch (MCP), not a
+	// social/discovery view, so it deliberately skips favorite decoration
+	// (like Get does not) - but variation_count is still cheap and useful
+	// for an MCP client managing its own recipes, so it's decorated here.
+	s.decorateVariationCount(ctx, &localized)
+	return localized, nil
 }
 
 func (s *Service) Get(ctx context.Context, recipeID, locale, userID string) (models.Recipe, error) {
@@ -499,7 +527,11 @@ func (s *Service) Get(ctx context.Context, recipeID, locale, userID string) (mod
 		return models.Recipe{}, err
 	}
 	localized := s.localize(recipe, locale)
-	s.decorateFavorite(ctx, &localized, userID)
+	// A detail page always represents one family, whichever member is being
+	// viewed, so favorites are always decorated family-wide here (unlike
+	// List, which has an "own recipes" per-recipe mode - see List).
+	s.decorateFamilyFavorite(ctx, &localized, userID)
+	s.decorateVariationCount(ctx, &localized)
 	return localized, nil
 }
 
@@ -572,6 +604,111 @@ func (s *Service) decorateFavoritePreviews(ctx context.Context, previews []model
 	}
 }
 
+// familyRootHex returns id's own hex when it's a root, or its VariationOf's
+// hex when it's a variation - the family root every family-wide decoration
+// (favorites, variation count) is keyed by.
+func familyRootHex(id, variationOf *primitive.ObjectID) string {
+	if variationOf != nil {
+		return variationOf.Hex()
+	}
+	if id != nil {
+		return id.Hex()
+	}
+	return ""
+}
+
+// decorateFamilyFavorite is decorateFavorite, but counting distinct people
+// who favorited any member of recipe's family (root or any variation), not
+// just recipe itself - see decision #6. Used everywhere except "My Recipes"
+// (List with OwnRecipes set), which wants each recipe's own individual count.
+func (s *Service) decorateFamilyFavorite(ctx context.Context, recipe *models.Recipe, userID string) {
+	rootHex := familyRootHex(recipe.Id, recipe.VariationOf)
+	if rootHex == "" {
+		return
+	}
+	info, err := s.db.GetFamilyFavoriteInfo(ctx, []string{rootHex}, userID)
+	if err != nil {
+		utils.LogError("could not load family favorite info", err)
+		return
+	}
+	if fav, ok := info[rootHex]; ok {
+		recipe.Favorite = fav.Favorited
+		recipe.FavoriteCount = fav.Count
+	}
+}
+
+// decorateFamilyFavoritePreviews is decorateFamilyFavorite for a page of
+// previews, fetched in one batched lookup keyed by family root.
+func (s *Service) decorateFamilyFavoritePreviews(ctx context.Context, previews []models.RecipePreview, userID string) {
+	rootHexes := make([]string, 0, len(previews))
+	seen := make(map[string]struct{}, len(previews))
+	for _, preview := range previews {
+		rootHex := familyRootHex(preview.Id, preview.VariationOf)
+		if rootHex == "" {
+			continue
+		}
+		if _, ok := seen[rootHex]; ok {
+			continue
+		}
+		seen[rootHex] = struct{}{}
+		rootHexes = append(rootHexes, rootHex)
+	}
+	if len(rootHexes) == 0 {
+		return
+	}
+	info, err := s.db.GetFamilyFavoriteInfo(ctx, rootHexes, userID)
+	if err != nil {
+		utils.LogError("could not load family favorite info", err)
+		return
+	}
+	for i := range previews {
+		rootHex := familyRootHex(previews[i].Id, previews[i].VariationOf)
+		if fav, ok := info[rootHex]; ok {
+			previews[i].Favorite = fav.Favorited
+			previews[i].FavoriteCount = fav.Count
+		}
+	}
+}
+
+// decorateVariationCount stamps VariationCount onto recipe; a no-op (count 0)
+// when recipe is itself a variation, since VariationCount describes a root's
+// family size, not "siblings of this variation".
+func (s *Service) decorateVariationCount(ctx context.Context, recipe *models.Recipe) {
+	if recipe.Id == nil || recipe.VariationOf != nil {
+		return
+	}
+	counts, err := s.db.GetVariationCounts(ctx, []string{recipe.Id.Hex()})
+	if err != nil {
+		utils.LogError("could not load variation count", err)
+		return
+	}
+	recipe.VariationCount = counts[recipe.Id.Hex()]
+}
+
+// decorateVariationCountsPreviews is decorateVariationCount for a page of
+// previews, fetched in one batched lookup.
+func (s *Service) decorateVariationCountsPreviews(ctx context.Context, previews []models.RecipePreview) {
+	ids := make([]string, 0, len(previews))
+	for _, preview := range previews {
+		if preview.Id != nil && preview.VariationOf == nil {
+			ids = append(ids, preview.Id.Hex())
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	counts, err := s.db.GetVariationCounts(ctx, ids)
+	if err != nil {
+		utils.LogError("could not load variation counts", err)
+		return
+	}
+	for i := range previews {
+		if previews[i].Id != nil && previews[i].VariationOf == nil {
+			previews[i].VariationCount = counts[previews[i].Id.Hex()]
+		}
+	}
+}
+
 func sameBaseLocale(left, right string) bool {
 	if left == "" || right == "" {
 		return false
@@ -593,10 +730,13 @@ func wantsTranslation(canonical models.Recipe, requested string) bool {
 
 // pickTranslation returns the stored translation when it matches the canonical's
 // source hash, otherwise the canonical recipe. Either way Locale is stamped with
-// what is actually being served.
+// what is actually being served. VariationOf always comes from canonical: it's a
+// structural relationship, not translatable content, and recipe_translations rows
+// never store it.
 func pickTranslation(canonical, translation models.Recipe, requested string, found bool) models.Recipe {
 	if found && translation.SourceHash != "" && translation.SourceHash == canonical.SourceHash {
 		translation.Locale = requested
+		translation.VariationOf = canonical.VariationOf
 		return translation
 	}
 	canonical.Locale = canonical.SourceLocale
@@ -650,7 +790,14 @@ func (s *Service) List(ctx context.Context, parameters models.GetRecipesRequest,
 	}
 
 	previews := s.localizePreviews(ctx, documents, parameters.Locale)
-	s.decorateFavoritePreviews(ctx, previews, userID)
+	if parameters.OwnRecipes {
+		// "My Recipes": each entry's own individual favorite count, not the
+		// family aggregate (decision #4).
+		s.decorateFavoritePreviews(ctx, previews, userID)
+	} else {
+		s.decorateFamilyFavoritePreviews(ctx, previews, userID)
+	}
+	s.decorateVariationCountsPreviews(ctx, previews)
 	return previews, count, nil
 }
 
@@ -674,7 +821,9 @@ func (s *Service) ListForUser(ctx context.Context, userID, cursor string, limit 
 		next = documents[limit-1].Id.Hex()
 		documents = documents[:limit]
 	}
-	return s.localizePreviews(ctx, documents, locale), count, next, nil
+	previews := s.localizePreviews(ctx, documents, locale)
+	s.decorateVariationCountsPreviews(ctx, previews)
+	return previews, count, next, nil
 }
 
 func (s *Service) localizePreviews(ctx context.Context, documents []models.Recipe, requested string) []models.RecipePreview {
@@ -705,7 +854,7 @@ func (s *Service) localizePreviews(ctx context.Context, documents []models.Recip
 			Id: recipe.Id, Title: recipe.Title, Description: recipe.Description, Author: recipe.Author,
 			PreparationTime: recipe.PreparationTime, CookingTime: recipe.CookingTime, RestingTime: recipe.RestingTime,
 			Kind: recipe.Kind, Quantity: recipe.Quantity, Pictures: recipe.Pictures,
-			SourceLocale: recipe.SourceLocale, Locale: recipe.Locale,
+			SourceLocale: recipe.SourceLocale, Locale: recipe.Locale, VariationOf: recipe.VariationOf,
 		})
 	}
 	return previews
@@ -721,6 +870,25 @@ func (s *Service) Delete(ctx context.Context, recipeID string) (models.RecipeDB,
 	}
 	if favorites[recipeID].Count > 0 {
 		return models.RecipeDB{}, ErrHasFavorites
+	}
+	// If recipeID has variations, promote the oldest one to be the new root
+	// and re-point the rest to it before deleting recipeID itself (decision
+	// #2). No DB transactions are available, so this relies on ordering, not
+	// atomicity, to stay crash-safe: a crash here either leaves recipeID
+	// fully intact (safe retry from scratch) or leaves promotion already
+	// applied with recipeID merely not-yet-deleted (a harmless, retry-safe
+	// duplicate root until the retry finishes).
+	oldestID, err := s.db.GetOldestVariationID(ctx, recipeID)
+	if err != nil {
+		return models.RecipeDB{}, err
+	}
+	if oldestID != nil {
+		if err := s.db.RepointVariations(ctx, recipeID, oldestID.Hex()); err != nil {
+			return models.RecipeDB{}, err
+		}
+		if err := s.db.PromoteRecipeToRoot(ctx, oldestID.Hex()); err != nil {
+			return models.RecipeDB{}, err
+		}
 	}
 	deleted, err := s.db.DeleteRecipeById(recipeID)
 	if err != nil {

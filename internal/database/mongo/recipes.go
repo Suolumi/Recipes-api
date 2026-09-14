@@ -187,12 +187,76 @@ func (c *Client) DeleteRecipeById(id string) (models.RecipeDB, error) {
 	return recipe, nil
 }
 
+// variationsLookupStage attaches each candidate's own variations (never its
+// root, never chained further) as a light `variations` array of {title,
+// ingredients} - just enough for the search cross-match below, not a full
+// recipe fetch.
+var variationsLookupStage = bson.D{{Key: "$lookup", Value: bson.D{
+	{Key: "from", Value: recipesCollection},
+	{Key: "localField", Value: "_id"},
+	{Key: "foreignField", Value: "variation_of"},
+	{Key: "as", Value: "variations"},
+	{Key: "pipeline", Value: mongo.Pipeline{{{Key: "$project", Value: bson.D{
+		{Key: "title", Value: 1}, {Key: "ingredients", Value: 1},
+	}}}}},
+}}}
+
+// familyIngredientsAllStages matches when every pattern is satisfied by the
+// union of the candidate's own <fieldPrefix>.name values and every attached
+// variation's ingredients.name values (see variationsLookupStage) - a
+// per-ingredient union across the family, not "every ingredient within one
+// single recipe": a query for "flour"+"cinnamon" matches a family where the
+// root has flour and a sibling variation has cinnamon, even if no single
+// recipe in the family has both. Accepted v1 behavior (decision #3).
+func familyIngredientsAllStages(fieldPrefix string, patterns []interface{}) []bson.D {
+	return []bson.D{
+		{{Key: "$addFields", Value: bson.D{{Key: "family_ingredient_names", Value: bson.D{
+			{Key: "$reduce", Value: bson.D{
+				{Key: "input", Value: "$variations"},
+				{Key: "initialValue", Value: bson.D{{Key: "$ifNull", Value: bson.A{"$" + fieldPrefix + ".name", bson.A{}}}}},
+				{Key: "in", Value: bson.D{{Key: "$setUnion", Value: bson.A{
+					"$$value",
+					bson.D{{Key: "$ifNull", Value: bson.A{"$$this.ingredients.name", bson.A{}}}},
+				}}}},
+			}},
+		}}}}},
+		{{Key: "$match", Value: bson.D{{Key: "family_ingredient_names", Value: bson.M{"$all": patterns}}}}},
+		{{Key: "$unset", Value: "family_ingredient_names"}},
+	}
+}
+
 // buildRecipeFilterPipeline returns the $lookup(author) plus every filter
 // stage for parameters, before any count/sort/skip/limit stage is appended.
 func buildRecipeFilterPipeline(parameters models.GetRecipesRequest) []bson.D {
 	var pipeline []bson.D
 
 	pipeline = append(pipeline, recipeAuthorPipeline...)
+
+	switch {
+	case parameters.VariationOf != "":
+		// List only the variations of the given recipe id, never the root.
+		if variationOfID, err := primitive.ObjectIDFromHex(parameters.VariationOf); err == nil {
+			pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.D{{Key: "variation_of", Value: variationOfID}}}})
+		}
+	case parameters.OwnRecipes:
+		// "My Recipes": no collapsing - every recipe matching Author is
+		// listed flatly, roots and variations alike (see decision #4).
+	default:
+		// Default public discovery listing: collapse each family to its
+		// root.
+		pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.D{{Key: "variation_of", Value: bson.D{{Key: "$exists", Value: false}}}}}})
+	}
+
+	// A title/ingredient search on the default discovery listing also
+	// matches into each candidate's own variations, surfacing the root when
+	// only a variation's text matches (decision #3) - never applied to the
+	// variation_of/own_recipes listings above, which aren't being viewed as
+	// "families" in that sense.
+	includeVariationsMatch := parameters.VariationOf == "" && !parameters.OwnRecipes &&
+		(parameters.Title != "" || len(parameters.Ingredients) > 0)
+	if includeVariationsMatch {
+		pipeline = append(pipeline, variationsLookupStage)
+	}
 
 	if parameters.SearchLocale != "" && (parameters.Title != "" || len(parameters.Ingredients) > 0) {
 		// Search the recipe_translations row for search_locale when one
@@ -233,18 +297,37 @@ func buildRecipeFilterPipeline(parameters models.GetRecipesRequest) []bson.D {
 			}}}},
 		}}})
 		if parameters.Title != "" {
-			pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.D{{Key: "search_title", Value: primitive.Regex{Pattern: regexp.QuoteMeta(parameters.Title), Options: "i"}}}}})
+			titleMatch := bson.D{{Key: "search_title", Value: primitive.Regex{Pattern: regexp.QuoteMeta(parameters.Title), Options: "i"}}}
+			if includeVariationsMatch {
+				pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.D{{Key: "$or", Value: bson.A{
+					titleMatch,
+					bson.D{{Key: "variations.title", Value: primitive.Regex{Pattern: regexp.QuoteMeta(parameters.Title), Options: "i"}}},
+				}}}}})
+			} else {
+				pipeline = append(pipeline, bson.D{{Key: "$match", Value: titleMatch}})
+			}
 		}
 		if len(parameters.Ingredients) > 0 {
 			ingredients := make([]interface{}, 0, len(parameters.Ingredients))
 			for _, ingredient := range parameters.Ingredients {
 				ingredients = append(ingredients, primitive.Regex{Pattern: regexp.QuoteMeta(ingredient), Options: "i"})
 			}
-			pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.D{{Key: "search_ingredients.name", Value: bson.M{"$all": ingredients}}}}})
+			if includeVariationsMatch {
+				pipeline = append(pipeline, familyIngredientsAllStages("search_ingredients", ingredients)...)
+			} else {
+				pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.D{{Key: "search_ingredients.name", Value: bson.M{"$all": ingredients}}}}})
+			}
 		}
 		pipeline = append(pipeline, bson.D{{Key: "$unset", Value: bson.A{"search_translation", "search_has_translation", "search_own_locale", "search_title", "search_ingredients"}}})
 	} else if parameters.Title != "" {
-		pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.D{{Key: "title", Value: primitive.Regex{Pattern: regexp.QuoteMeta(parameters.Title), Options: "i"}}}}})
+		if includeVariationsMatch {
+			pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.D{{Key: "$or", Value: bson.A{
+				bson.D{{Key: "title", Value: primitive.Regex{Pattern: regexp.QuoteMeta(parameters.Title), Options: "i"}}},
+				bson.D{{Key: "variations.title", Value: primitive.Regex{Pattern: regexp.QuoteMeta(parameters.Title), Options: "i"}}},
+			}}}}})
+		} else {
+			pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.D{{Key: "title", Value: primitive.Regex{Pattern: regexp.QuoteMeta(parameters.Title), Options: "i"}}}}})
+		}
 	}
 	if parameters.Author != "" {
 		pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.D{{Key: "author.username", Value: primitive.Regex{Pattern: regexp.QuoteMeta(parameters.Author), Options: "i"}}}}})
@@ -258,7 +341,15 @@ func buildRecipeFilterPipeline(parameters models.GetRecipesRequest) []bson.D {
 		for _, ingredient := range parameters.Ingredients {
 			ingredients = append(ingredients, primitive.Regex{Pattern: regexp.QuoteMeta(ingredient), Options: "i"})
 		}
-		pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.D{{Key: "ingredients.name", Value: bson.M{"$all": ingredients}}}}})
+		if includeVariationsMatch {
+			pipeline = append(pipeline, familyIngredientsAllStages("ingredients", ingredients)...)
+		} else {
+			pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.D{{Key: "ingredients.name", Value: bson.M{"$all": ingredients}}}}})
+		}
+	}
+
+	if includeVariationsMatch {
+		pipeline = append(pipeline, bson.D{{Key: "$unset", Value: "variations"}})
 	}
 
 	return pipeline
@@ -509,4 +600,98 @@ func (c *Client) RecipeConflicts(recipe models.RecipeDB) (models.RecipeDB, error
 	}
 
 	return models.RecipeDB{}, nil
+}
+
+// GetOldestVariationID returns the id of rootID's oldest remaining variation
+// (by creation order), or (nil, nil) if it has none - a missing result is a
+// valid zero-state, not an error, matching the convention already used by
+// GetFavoriteInfo/favoritedRecipeIDs for "nothing found".
+func (c *Client) GetOldestVariationID(ctx context.Context, rootID string) (*primitive.ObjectID, error) {
+	rootObjectID, err := primitive.ObjectIDFromHex(rootID)
+	if err != nil {
+		return nil, err
+	}
+	var doc struct {
+		ID primitive.ObjectID `bson:"_id"`
+	}
+	err = c.db.Collection(recipesCollection).FindOne(ctx,
+		bson.M{"variation_of": rootObjectID},
+		options.FindOne().SetSort(bson.D{{Key: "_id", Value: 1}}).SetProjection(bson.M{"_id": 1}),
+	).Decode(&doc)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &doc.ID, nil
+}
+
+// RepointVariations re-points every variation of oldRootID (other than
+// newRootID itself) to newRootID.
+func (c *Client) RepointVariations(ctx context.Context, oldRootID, newRootID string) error {
+	oldRootObjectID, err := primitive.ObjectIDFromHex(oldRootID)
+	if err != nil {
+		return err
+	}
+	newRootObjectID, err := primitive.ObjectIDFromHex(newRootID)
+	if err != nil {
+		return err
+	}
+	_, err = c.db.Collection(recipesCollection).UpdateMany(ctx,
+		bson.M{"variation_of": oldRootObjectID, "_id": bson.M{"$ne": newRootObjectID}},
+		bson.M{"$set": bson.M{"variation_of": newRootObjectID}},
+	)
+	return err
+}
+
+// PromoteRecipeToRoot clears id's variation_of, making it a root.
+func (c *Client) PromoteRecipeToRoot(ctx context.Context, id string) error {
+	objectID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return err
+	}
+	_, err = c.db.Collection(recipesCollection).UpdateOne(ctx,
+		bson.M{"_id": objectID},
+		bson.M{"$unset": bson.M{"variation_of": ""}},
+	)
+	return err
+}
+
+// GetVariationCounts returns, for each given root id, how many variations it
+// has. A root with none is simply absent from the map.
+func (c *Client) GetVariationCounts(ctx context.Context, rootIDs []string) (map[string]int64, error) {
+	result := make(map[string]int64, len(rootIDs))
+	objectIDs := make([]primitive.ObjectID, 0, len(rootIDs))
+	for _, id := range rootIDs {
+		objectID, err := primitive.ObjectIDFromHex(id)
+		if err != nil {
+			return nil, err
+		}
+		objectIDs = append(objectIDs, objectID)
+	}
+	if len(objectIDs) == 0 {
+		return result, nil
+	}
+	cursor, err := c.db.Collection(recipesCollection).Aggregate(ctx, bson.A{
+		bson.D{{Key: "$match", Value: bson.D{{Key: "variation_of", Value: bson.D{{Key: "$in", Value: objectIDs}}}}}},
+		bson.D{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: "$variation_of"},
+			{Key: "count", Value: bson.D{{Key: "$sum", Value: 1}}},
+		}}},
+	})
+	if err != nil {
+		return nil, err
+	}
+	var docs []struct {
+		ID    primitive.ObjectID `bson:"_id"`
+		Count int64              `bson:"count"`
+	}
+	if err := cursor.All(ctx, &docs); err != nil {
+		return nil, err
+	}
+	for _, doc := range docs {
+		result[doc.ID.Hex()] = doc.Count
+	}
+	return result, nil
 }

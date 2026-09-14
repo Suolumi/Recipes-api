@@ -18,6 +18,14 @@ type GetRecipesRequest struct {
 	Locale          string     `query:"locale,omitempty"`
 	SearchLocale    string     `query:"search_locale,omitempty"`
 	Favorite        bool       `query:"favorite,omitempty"`
+	// VariationOf, when set, lists only the variations of that recipe id
+	// (never the root itself) instead of the default root-only listing.
+	VariationOf string `query:"variation_of,omitempty"`
+	// OwnRecipes switches List into "My Recipes" mode: every recipe matching
+	// Author is returned flatly (roots and variations alike, no collapsing),
+	// and favorite decoration is per-recipe instead of family-aggregate. Set
+	// only by the Settings page's own-recipes fetch.
+	OwnRecipes bool `query:"own_recipes,omitempty"`
 }
 
 type GetRecipesResponse struct {
@@ -74,6 +82,15 @@ type CreateRecipe struct {
 	Pictures        []string     `bson:"pictures,omitempty" json:"-"`
 	SourceLocale    string       `bson:"source_locale,omitempty" json:"locale,omitempty"`
 	SourceHash      string       `bson:"source_hash,omitempty" json:"-"`
+	// VariationOf, on the way in, is the id of the recipe being forked; the
+	// service resolves it to that recipe's root (flattening a
+	// variation-of-a-variation) before it's ever persisted. Must stay the
+	// same *primitive.ObjectID type as RecipeDB.VariationOf: Create() passes
+	// values through utils.DupStruct in both directions between these two
+	// structs (service.go, mongo/recipes.go), which copies same-named fields
+	// with a raw reflect.Value.Set that panics on a type mismatch. A plain
+	// hex string unmarshals into this directly, same as any other id field.
+	VariationOf *primitive.ObjectID `bson:"variation_of,omitempty" json:"variation_of,omitempty"`
 }
 
 type RecipeDB struct {
@@ -92,6 +109,9 @@ type RecipeDB struct {
 	SourceLocale    string              `bson:"source_locale,omitempty" json:"source_locale,omitempty"`
 	Locale          string              `bson:"locale,omitempty" json:"locale,omitempty"`
 	SourceHash      string              `bson:"source_hash,omitempty" json:"-"`
+	// VariationOf is nil for a root/original recipe, or the root recipe's id
+	// for a variation - always flattened, never chained.
+	VariationOf *primitive.ObjectID `bson:"variation_of,omitempty" json:"variation_of,omitempty"`
 }
 
 // Recipe has bson fields to unfold the author when getting the document
@@ -111,11 +131,14 @@ type Recipe struct {
 	SourceLocale    string              `bson:"source_locale,omitempty" json:"source_locale,omitempty"`
 	Locale          string              `bson:"locale,omitempty" json:"locale,omitempty"`
 	SourceHash      string              `bson:"source_hash,omitempty" json:"-"`
-	// Favorite and FavoriteCount are stamped on after fetch (see
-	// recipe_service.decorateFavorite); they never come from the recipe or
-	// translation document itself, hence bson:"-".
-	Favorite      bool  `bson:"-" json:"favorite"`
-	FavoriteCount int64 `bson:"-" json:"favorite_count"`
+	VariationOf     *primitive.ObjectID `bson:"variation_of,omitempty" json:"variation_of,omitempty"`
+	// Favorite, FavoriteCount and VariationCount are stamped on after fetch
+	// (see recipe_service.decorateFamilyFavorite/decorateVariationCount);
+	// they never come from the recipe or translation document itself, hence
+	// bson:"-".
+	Favorite       bool  `bson:"-" json:"favorite"`
+	FavoriteCount  int64 `bson:"-" json:"favorite_count"`
+	VariationCount int64 `bson:"-" json:"variation_count"`
 }
 
 // MarshalJSON ensures a recipe with no pictures serializes `pictures` as `[]`
@@ -148,6 +171,7 @@ func (r *Recipe) ToRecipeDB() RecipeDB {
 		SourceLocale:    r.SourceLocale,
 		Locale:          r.Locale,
 		SourceHash:      r.SourceHash,
+		VariationOf:     r.VariationOf,
 	}
 }
 
@@ -164,8 +188,10 @@ type RecipePreview struct {
 	Pictures        []string            `bson:"pictures,omitempty" json:"pictures"`
 	SourceLocale    string              `bson:"source_locale,omitempty" json:"source_locale,omitempty"`
 	Locale          string              `bson:"locale,omitempty" json:"locale,omitempty"`
+	VariationOf     *primitive.ObjectID `bson:"variation_of,omitempty" json:"variation_of,omitempty"`
 	Favorite        bool                `bson:"-" json:"favorite"`
 	FavoriteCount   int64               `bson:"-" json:"favorite_count"`
+	VariationCount  int64               `bson:"-" json:"variation_count"`
 }
 
 // MarshalJSON ensures `pictures` serializes as `[]` rather than `null`; see

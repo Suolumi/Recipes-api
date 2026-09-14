@@ -89,6 +89,12 @@ type RecipeOutput struct {
 	Pictures        []PictureOutput     `json:"pictures"`
 	SourceLocale    string              `json:"source_locale,omitempty"`
 	Locale          string              `json:"locale,omitempty"`
+	// VariationOf is the id of the recipe this one is a variation of, empty
+	// for a root recipe. VariationCount is how many variations a root has
+	// (always 0 for a variation - it describes the root's family size, not
+	// "siblings of this variation").
+	VariationOf    string `json:"variation_of,omitempty"`
+	VariationCount int64  `json:"variation_count"`
 }
 
 type ListOutput struct {
@@ -215,10 +221,13 @@ func (s *Server) recipeOutput(recipe models.Recipe) RecipeOutput {
 		Title: recipe.Title, Description: recipe.Description, Quantity: recipe.Quantity, Kind: recipe.Kind,
 		PreparationTime: recipe.PreparationTime, CookingTime: recipe.CookingTime, RestingTime: recipe.RestingTime,
 		Ingredients: recipe.Ingredients, Steps: s.stepOutputs(recipe.Steps), SourceLocale: recipe.SourceLocale, Locale: recipe.Locale,
-		Pictures: []PictureOutput{},
+		Pictures: []PictureOutput{}, VariationCount: recipe.VariationCount,
 	}
 	if recipe.Id != nil {
 		output.ID = recipe.Id.Hex()
+	}
+	if recipe.VariationOf != nil {
+		output.VariationOf = recipe.VariationOf.Hex()
 	}
 	for _, id := range recipe.Pictures {
 		output.Pictures = append(output.Pictures, PictureOutput{ID: id, URL: s.pictureBase + id})
@@ -231,10 +240,13 @@ func (s *Server) previewOutput(recipe models.RecipePreview) RecipeOutput {
 		Title: recipe.Title, Description: recipe.Description, Quantity: recipe.Quantity, Kind: recipe.Kind,
 		PreparationTime: recipe.PreparationTime, CookingTime: recipe.CookingTime, RestingTime: recipe.RestingTime,
 		SourceLocale: recipe.SourceLocale, Locale: recipe.Locale,
-		Pictures: []PictureOutput{},
+		Pictures: []PictureOutput{}, VariationCount: recipe.VariationCount,
 	}
 	if recipe.Id != nil {
 		result.ID = recipe.Id.Hex()
+	}
+	if recipe.VariationOf != nil {
+		result.VariationOf = recipe.VariationOf.Hex()
 	}
 	for _, id := range recipe.Pictures {
 		result.Pictures = append(result.Pictures, PictureOutput{ID: id, URL: s.pictureBase + id})

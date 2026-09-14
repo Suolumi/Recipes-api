@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	mongodriver "go.mongodb.org/mongo-driver/mongo"
 	"recipes/internal/models"
 )
@@ -34,11 +35,16 @@ type Database interface {
 	DeleteRecipeById(id string) (models.RecipeDB, error)
 	DeleteLocalizedRecipesByID(ctx context.Context, id string) error
 	RecipeConflicts(recipe models.RecipeDB) (models.RecipeDB, error)
+	GetOldestVariationID(ctx context.Context, rootID string) (*primitive.ObjectID, error)
+	RepointVariations(ctx context.Context, oldRootID, newRootID string) error
+	PromoteRecipeToRoot(ctx context.Context, id string) error
+	GetVariationCounts(ctx context.Context, rootIDs []string) (map[string]int64, error)
 
 	AddFavorite(ctx context.Context, userID, recipeID string) error
 	RemoveFavorite(ctx context.Context, userID, recipeID string) error
 	DeleteFavoritesByRecipeID(ctx context.Context, recipeID string) error
 	GetFavoriteInfo(ctx context.Context, ids []string, userID string) (map[string]models.FavoriteInfo, error)
+	GetFamilyFavoriteInfo(ctx context.Context, rootIDs []string, userID string) (map[string]models.FavoriteInfo, error)
 
 	RawDatabase() *mongodriver.Database
 }

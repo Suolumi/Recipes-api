@@ -16,6 +16,7 @@ import (
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
+	mongorepo "recipes/internal/database/mongo"
 	"recipes/internal/models"
 )
 
@@ -30,10 +31,21 @@ type fakeStore struct {
 	getRecipeDocumentsBoostedFn func(userID string, parameters models.GetRecipesRequest) ([]models.Recipe, []models.Recipe, int64, error)
 	getRecipeDocumentsBoosted   int
 	getFavoriteInfoFn           func(ids []string, userID string) (map[string]models.FavoriteInfo, error)
+	getFamilyFavoriteInfoFn     func(rootIDs []string, userID string) (map[string]models.FavoriteInfo, error)
 	deleteRecipeByIdFn          func(id string) (models.RecipeDB, error)
 	deleteRecipeById            int
 	createRecipeFn              func(authorID string, infos *models.CreateRecipe) (models.Recipe, error)
 	replaceRecipeByIdFn         func(id string, recipe models.RecipeDB) (models.Recipe, error)
+	getOldestVariationIDFn      func(rootID string) (*primitive.ObjectID, error)
+	repointVariationsFn         func(oldRootID, newRootID string) error
+	promoteRecipeToRootFn       func(id string) error
+	getVariationCountsFn        func(rootIDs []string) (map[string]int64, error)
+	// callOrder records, in order, the names of RepointVariations/
+	// PromoteRecipeToRoot/DeleteRecipeById calls - used to assert promotion
+	// happens strictly before the delete.
+	callOrder           []string
+	repointVariations   int
+	promoteRecipeToRoot int
 }
 
 func (f *fakeStore) CreateRecipe(authorID string, infos *models.CreateRecipe) (models.Recipe, error) {
@@ -91,12 +103,41 @@ func (f *fakeStore) AddLocaleRecipe(recipe models.Recipe, locale string) (models
 }
 func (f *fakeStore) DeleteRecipeById(id string) (models.RecipeDB, error) {
 	f.deleteRecipeById++
+	f.callOrder = append(f.callOrder, "DeleteRecipeById")
 	if f.deleteRecipeByIdFn != nil {
 		return f.deleteRecipeByIdFn(id)
 	}
 	return models.RecipeDB{}, nil
 }
 func (f *fakeStore) DeleteLocalizedRecipesByID(context.Context, string) error { return nil }
+func (f *fakeStore) GetOldestVariationID(_ context.Context, rootID string) (*primitive.ObjectID, error) {
+	if f.getOldestVariationIDFn != nil {
+		return f.getOldestVariationIDFn(rootID)
+	}
+	return nil, nil
+}
+func (f *fakeStore) RepointVariations(_ context.Context, oldRootID, newRootID string) error {
+	f.repointVariations++
+	f.callOrder = append(f.callOrder, "RepointVariations")
+	if f.repointVariationsFn != nil {
+		return f.repointVariationsFn(oldRootID, newRootID)
+	}
+	return nil
+}
+func (f *fakeStore) PromoteRecipeToRoot(_ context.Context, id string) error {
+	f.promoteRecipeToRoot++
+	f.callOrder = append(f.callOrder, "PromoteRecipeToRoot")
+	if f.promoteRecipeToRootFn != nil {
+		return f.promoteRecipeToRootFn(id)
+	}
+	return nil
+}
+func (f *fakeStore) GetVariationCounts(_ context.Context, rootIDs []string) (map[string]int64, error) {
+	if f.getVariationCountsFn != nil {
+		return f.getVariationCountsFn(rootIDs)
+	}
+	return map[string]int64{}, nil
+}
 
 func (f *fakeStore) AddFavorite(context.Context, string, string) error       { return nil }
 func (f *fakeStore) RemoveFavorite(context.Context, string, string) error    { return nil }
@@ -104,6 +145,12 @@ func (f *fakeStore) DeleteFavoritesByRecipeID(context.Context, string) error { r
 func (f *fakeStore) GetFavoriteInfo(_ context.Context, ids []string, userID string) (map[string]models.FavoriteInfo, error) {
 	if f.getFavoriteInfoFn != nil {
 		return f.getFavoriteInfoFn(ids, userID)
+	}
+	return map[string]models.FavoriteInfo{}, nil
+}
+func (f *fakeStore) GetFamilyFavoriteInfo(_ context.Context, rootIDs []string, userID string) (map[string]models.FavoriteInfo, error) {
+	if f.getFamilyFavoriteInfoFn != nil {
+		return f.getFamilyFavoriteInfoFn(rootIDs, userID)
 	}
 	return map[string]models.FavoriteInfo{}, nil
 }
@@ -280,9 +327,9 @@ func TestGetDecoratesFavorite(t *testing.T) {
 	canonical := canonicalRecipe()
 	store := &fakeStore{
 		getRecipeByIdFn: func(string) (models.Recipe, error) { return canonical, nil },
-		getFavoriteInfoFn: func(ids []string, userID string) (map[string]models.FavoriteInfo, error) {
-			if len(ids) != 1 || ids[0] != canonical.Id.Hex() || userID != "user-1" {
-				t.Fatalf("GetFavoriteInfo called with ids=%v userID=%q", ids, userID)
+		getFamilyFavoriteInfoFn: func(rootIDs []string, userID string) (map[string]models.FavoriteInfo, error) {
+			if len(rootIDs) != 1 || rootIDs[0] != canonical.Id.Hex() || userID != "user-1" {
+				t.Fatalf("GetFamilyFavoriteInfo called with rootIDs=%v userID=%q", rootIDs, userID)
 			}
 			return map[string]models.FavoriteInfo{canonical.Id.Hex(): {Count: 3, Favorited: true}}, nil
 		},
@@ -301,8 +348,8 @@ func TestGetDecoratesFavorite(t *testing.T) {
 func TestGetLeavesFavoriteZeroValueOnLookupError(t *testing.T) {
 	canonical := canonicalRecipe()
 	store := &fakeStore{
-		getRecipeByIdFn:   func(string) (models.Recipe, error) { return canonical, nil },
-		getFavoriteInfoFn: func([]string, string) (map[string]models.FavoriteInfo, error) { return nil, errors.New("boom") },
+		getRecipeByIdFn:         func(string) (models.Recipe, error) { return canonical, nil },
+		getFamilyFavoriteInfoFn: func([]string, string) (map[string]models.FavoriteInfo, error) { return nil, errors.New("boom") },
 	}
 	s := &Service{db: store}
 
@@ -326,7 +373,7 @@ func TestListBoostedMergesFavoritedFirstAndDecorates(t *testing.T) {
 			return []models.Recipe{{Id: &favoritedID, Title: "Favorited"}},
 				[]models.Recipe{{Id: &restID, Title: "Rest"}}, 5, nil
 		},
-		getFavoriteInfoFn: func(ids []string, userID string) (map[string]models.FavoriteInfo, error) {
+		getFamilyFavoriteInfoFn: func(rootIDs []string, userID string) (map[string]models.FavoriteInfo, error) {
 			return map[string]models.FavoriteInfo{
 				favoritedID.Hex(): {Count: 2, Favorited: true},
 				restID.Hex():      {Count: 0, Favorited: false},
@@ -675,5 +722,224 @@ func TestDeleteRemovesStepPicturesFromDisk(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "step-pic.jpg")); !os.IsNotExist(err) {
 		t.Fatalf("step-pic.jpg still exists after recipe deletion, err = %v", err)
+	}
+}
+
+func validCreateRecipe() models.CreateRecipe {
+	return models.CreateRecipe{
+		Title: "Cinnamon Rolls", Description: "d", Quantity: 1, Kind: models.RecipeKinds[0],
+		Ingredients: []models.Ingredient{{Name: "Flour"}},
+		Steps:       []models.Step{{Description: "Mix"}},
+	}
+}
+
+func TestCreateResolvesVariationRoot(t *testing.T) {
+	targetID := ptrObjectID()
+	target := models.Recipe{Id: targetID, Author: &models.UserView{Id: ptrObjectID()}}
+	var stored models.CreateRecipe
+	store := &fakeStore{
+		getRecipeByIdFn: func(id string) (models.Recipe, error) {
+			if id != targetID.Hex() {
+				t.Fatalf("GetRecipeById called with %q, want %q", id, targetID.Hex())
+			}
+			return target, nil
+		},
+		createRecipeFn: func(_ string, infos *models.CreateRecipe) (models.Recipe, error) {
+			stored = *infos
+			return models.Recipe{Id: ptrObjectID(), SourceHash: infos.SourceHash}, nil
+		},
+	}
+	s := &Service{db: store, imageDir: t.TempDir(), maxPictureBytes: 10 << 20}
+
+	input := validCreateRecipe()
+	input.VariationOf = targetID
+	if _, err := s.Create(context.Background(), "author-1", input, nil, nil); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if stored.VariationOf == nil || stored.VariationOf.Hex() != targetID.Hex() {
+		t.Fatalf("stored.VariationOf = %v, want %v", stored.VariationOf, targetID)
+	}
+}
+
+func TestCreateFlattensVariationOfVariation(t *testing.T) {
+	rootID := ptrObjectID()
+	targetID := ptrObjectID()
+	// target is itself a variation of rootID.
+	target := models.Recipe{Id: targetID, VariationOf: rootID, Author: &models.UserView{Id: ptrObjectID()}}
+	var stored models.CreateRecipe
+	store := &fakeStore{
+		getRecipeByIdFn: func(string) (models.Recipe, error) { return target, nil },
+		createRecipeFn: func(_ string, infos *models.CreateRecipe) (models.Recipe, error) {
+			stored = *infos
+			return models.Recipe{Id: ptrObjectID(), SourceHash: infos.SourceHash}, nil
+		},
+	}
+	s := &Service{db: store, imageDir: t.TempDir(), maxPictureBytes: 10 << 20}
+
+	input := validCreateRecipe()
+	input.VariationOf = targetID
+	if _, err := s.Create(context.Background(), "author-1", input, nil, nil); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if stored.VariationOf == nil || stored.VariationOf.Hex() != rootID.Hex() {
+		t.Fatalf("stored.VariationOf = %v, want flattened root %v, not the intermediate variation", stored.VariationOf, rootID)
+	}
+}
+
+func TestCreateVariationOfMissingTargetReturnsNotFound(t *testing.T) {
+	store := &fakeStore{
+		getRecipeByIdFn: func(string) (models.Recipe, error) { return models.Recipe{}, mongorepo.NotFoundError },
+	}
+	s := &Service{db: store, imageDir: t.TempDir(), maxPictureBytes: 10 << 20}
+
+	input := validCreateRecipe()
+	input.VariationOf = ptrObjectID()
+	_, err := s.Create(context.Background(), "author-1", input, nil, nil)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Create err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestSourceHashIgnoresVariationOf(t *testing.T) {
+	base := validRecipeDB(nil)
+	base.Ingredients = []models.Ingredient{{Name: "Flour"}}
+	withVariation := base
+	withVariation.VariationOf = ptrObjectID()
+
+	if sourceHash(base) != sourceHash(withVariation) {
+		t.Fatal("sourceHash differs based on VariationOf alone, want it to depend only on content")
+	}
+}
+
+func TestDeleteWithNoVariationsSkipsPromotion(t *testing.T) {
+	id := primitive.NewObjectID().Hex()
+	store := &fakeStore{
+		getFavoriteInfoFn: func(ids []string, userID string) (map[string]models.FavoriteInfo, error) {
+			return map[string]models.FavoriteInfo{}, nil
+		},
+	}
+	s := &Service{db: store}
+
+	if _, err := s.Delete(context.Background(), id); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if store.repointVariations != 0 || store.promoteRecipeToRoot != 0 {
+		t.Fatalf("promotion calls = repoint:%d promote:%d, want 0/0", store.repointVariations, store.promoteRecipeToRoot)
+	}
+	if store.deleteRecipeById != 1 {
+		t.Fatalf("DeleteRecipeById called %d times, want 1", store.deleteRecipeById)
+	}
+}
+
+func TestDeletePromotesOldestVariationBeforeDeletingRoot(t *testing.T) {
+	rootID := primitive.NewObjectID().Hex()
+	oldestVariation := ptrObjectID()
+	store := &fakeStore{
+		getFavoriteInfoFn: func(ids []string, userID string) (map[string]models.FavoriteInfo, error) {
+			return map[string]models.FavoriteInfo{}, nil
+		},
+		getOldestVariationIDFn: func(gotRootID string) (*primitive.ObjectID, error) {
+			if gotRootID != rootID {
+				t.Fatalf("GetOldestVariationID called with %q, want %q", gotRootID, rootID)
+			}
+			return oldestVariation, nil
+		},
+		repointVariationsFn: func(oldRootID, newRootID string) error {
+			if oldRootID != rootID || newRootID != oldestVariation.Hex() {
+				t.Fatalf("RepointVariations(%q, %q), want (%q, %q)", oldRootID, newRootID, rootID, oldestVariation.Hex())
+			}
+			return nil
+		},
+		promoteRecipeToRootFn: func(id string) error {
+			if id != oldestVariation.Hex() {
+				t.Fatalf("PromoteRecipeToRoot(%q), want %q", id, oldestVariation.Hex())
+			}
+			return nil
+		},
+	}
+	s := &Service{db: store}
+
+	if _, err := s.Delete(context.Background(), rootID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if store.repointVariations != 1 || store.promoteRecipeToRoot != 1 || store.deleteRecipeById != 1 {
+		t.Fatalf("call counts = repoint:%d promote:%d delete:%d, want 1/1/1", store.repointVariations, store.promoteRecipeToRoot, store.deleteRecipeById)
+	}
+	want := []string{"RepointVariations", "PromoteRecipeToRoot", "DeleteRecipeById"}
+	if len(store.callOrder) != len(want) {
+		t.Fatalf("callOrder = %v, want %v", store.callOrder, want)
+	}
+	for i, name := range want {
+		if store.callOrder[i] != name {
+			t.Fatalf("callOrder = %v, want %v", store.callOrder, want)
+		}
+	}
+}
+
+func TestDeleteStillBlockedByFavoritesEvenWithVariations(t *testing.T) {
+	id := primitive.NewObjectID().Hex()
+	store := &fakeStore{
+		getFavoriteInfoFn: func(ids []string, userID string) (map[string]models.FavoriteInfo, error) {
+			return map[string]models.FavoriteInfo{id: {Count: 1}}, nil
+		},
+		getOldestVariationIDFn: func(string) (*primitive.ObjectID, error) {
+			t.Fatal("GetOldestVariationID should not be called when the favorites guard already blocks the delete")
+			return nil, nil
+		},
+	}
+	s := &Service{db: store}
+
+	if _, err := s.Delete(context.Background(), id); !errors.Is(err, ErrHasFavorites) {
+		t.Fatalf("Delete err = %v, want ErrHasFavorites", err)
+	}
+	if store.repointVariations != 0 || store.promoteRecipeToRoot != 0 {
+		t.Fatalf("promotion calls = repoint:%d promote:%d, want 0/0", store.repointVariations, store.promoteRecipeToRoot)
+	}
+}
+
+func TestGetDecoratesVariationCount(t *testing.T) {
+	canonical := canonicalRecipe()
+	store := &fakeStore{
+		getRecipeByIdFn: func(string) (models.Recipe, error) { return canonical, nil },
+		getVariationCountsFn: func(ids []string) (map[string]int64, error) {
+			if len(ids) != 1 || ids[0] != canonical.Id.Hex() {
+				t.Fatalf("GetVariationCounts called with %v, want [%s]", ids, canonical.Id.Hex())
+			}
+			return map[string]int64{canonical.Id.Hex(): 2}, nil
+		},
+	}
+	s := &Service{db: store}
+
+	got, err := s.Get(context.Background(), canonical.Id.Hex(), "", "")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.VariationCount != 2 {
+		t.Fatalf("VariationCount = %d, want 2", got.VariationCount)
+	}
+}
+
+func TestListUsesPerRecipeFavoritesForOwnRecipes(t *testing.T) {
+	id := ptrObjectID()
+	store := &fakeStore{
+		getRecipeDocumentsFn: func(models.GetRecipesRequest) ([]models.Recipe, int64, error) {
+			return []models.Recipe{{Id: id}}, 1, nil
+		},
+		getFavoriteInfoFn: func(ids []string, userID string) (map[string]models.FavoriteInfo, error) {
+			return map[string]models.FavoriteInfo{id.Hex(): {Count: 1, Favorited: true}}, nil
+		},
+		getFamilyFavoriteInfoFn: func([]string, string) (map[string]models.FavoriteInfo, error) {
+			t.Fatal("GetFamilyFavoriteInfo should not be called in OwnRecipes mode")
+			return nil, nil
+		},
+	}
+	s := &Service{db: store}
+
+	previews, _, err := s.List(context.Background(), models.GetRecipesRequest{OwnRecipes: true}, "user-1")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(previews) != 1 || !previews[0].Favorite || previews[0].FavoriteCount != 1 {
+		t.Fatalf("previews = %+v, want one favorited preview with count 1", previews)
 	}
 }

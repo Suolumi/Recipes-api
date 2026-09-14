@@ -17,8 +17,9 @@ func (c *Client) EnsureIndexes(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("create user indexes: %w", err)
 	}
-	if _, err := c.db.Collection(recipesCollection).Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "author", Value: 1}, {Key: "_id", Value: -1}}, Options: options.Index().SetName("recipes_author_cursor"),
+	if _, err := c.db.Collection(recipesCollection).Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "author", Value: 1}, {Key: "_id", Value: -1}}, Options: options.Index().SetName("recipes_author_cursor")},
+		{Keys: bson.D{{Key: "variation_of", Value: 1}}, Options: options.Index().SetSparse(true).SetName("recipes_variation_of")},
 	}); err != nil {
 		return fmt.Errorf("create recipe indexes: %w", err)
 	}
