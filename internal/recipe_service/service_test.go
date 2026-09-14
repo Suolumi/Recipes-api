@@ -1,8 +1,14 @@
 package recipe_service
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"image"
+	"image/color"
+	"image/png"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -26,12 +32,20 @@ type fakeStore struct {
 	getFavoriteInfoFn           func(ids []string, userID string) (map[string]models.FavoriteInfo, error)
 	deleteRecipeByIdFn          func(id string) (models.RecipeDB, error)
 	deleteRecipeById            int
+	createRecipeFn              func(authorID string, infos *models.CreateRecipe) (models.Recipe, error)
+	replaceRecipeByIdFn         func(id string, recipe models.RecipeDB) (models.Recipe, error)
 }
 
-func (f *fakeStore) CreateRecipe(string, *models.CreateRecipe) (models.Recipe, error) {
+func (f *fakeStore) CreateRecipe(authorID string, infos *models.CreateRecipe) (models.Recipe, error) {
+	if f.createRecipeFn != nil {
+		return f.createRecipeFn(authorID, infos)
+	}
 	return models.Recipe{}, nil
 }
-func (f *fakeStore) ReplaceRecipeById(context.Context, string, models.RecipeDB) (models.Recipe, error) {
+func (f *fakeStore) ReplaceRecipeById(_ context.Context, id string, recipe models.RecipeDB) (models.Recipe, error) {
+	if f.replaceRecipeByIdFn != nil {
+		return f.replaceRecipeByIdFn(id, recipe)
+	}
 	return models.Recipe{}, nil
 }
 func (f *fakeStore) GetRecipeById(id string) (models.Recipe, error) {
@@ -445,5 +459,221 @@ func TestValidateRecipeAllowsEmptyLabel(t *testing.T) {
 	}
 	if recipe.Ingredients[0].Label != "" {
 		t.Fatalf("Label = %q, want empty", recipe.Ingredients[0].Label)
+	}
+}
+
+// pictureUpload builds a small valid PNG upload for tests that exercise
+// normalization/writing.
+func pictureUpload(t *testing.T) PictureUpload {
+	t.Helper()
+	img := image.NewNRGBA(image.Rect(0, 0, 2, 2))
+	img.Set(0, 0, color.NRGBA{R: 255, A: 255})
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode png: %v", err)
+	}
+	return PictureUpload{Filename: "step.png", MediaType: "image/png", Data: buf.Bytes()}
+}
+
+func TestStepPictureUploadsValidatesRange(t *testing.T) {
+	s := &Service{}
+
+	t.Run("empty map is a no-op", func(t *testing.T) {
+		indices, uploads, err := s.stepPictureUploads(nil, 3)
+		if err != nil || indices != nil || uploads != nil {
+			t.Fatalf("got (%v, %v, %v), want (nil, nil, nil)", indices, uploads, err)
+		}
+	})
+
+	t.Run("rejects out-of-range index", func(t *testing.T) {
+		_, _, err := s.stepPictureUploads(map[int]PictureUpload{2: {}}, 2)
+		if !errors.Is(err, ErrInvalid) {
+			t.Fatalf("err = %v, want ErrInvalid", err)
+		}
+	})
+
+	t.Run("orders by ascending index", func(t *testing.T) {
+		upload0, upload2 := PictureUpload{Filename: "a"}, PictureUpload{Filename: "b"}
+		indices, uploads, err := s.stepPictureUploads(map[int]PictureUpload{2: upload2, 0: upload0}, 3)
+		if err != nil {
+			t.Fatalf("stepPictureUploads: %v", err)
+		}
+		if !reflect.DeepEqual(indices, []int{0, 2}) {
+			t.Fatalf("indices = %v, want [0 2]", indices)
+		}
+		if uploads[0].Filename != "a" || uploads[1].Filename != "b" {
+			t.Fatalf("uploads = %+v, want [a b] in order", uploads)
+		}
+	})
+}
+
+func TestCreateIgnoresClientSuppliedStepPictureAndUsesUpload(t *testing.T) {
+	dir := t.TempDir()
+	var stored models.CreateRecipe
+	store := &fakeStore{createRecipeFn: func(_ string, infos *models.CreateRecipe) (models.Recipe, error) {
+		stored = *infos
+		return models.Recipe{Id: ptrObjectID(), SourceHash: infos.SourceHash, Steps: infos.Steps}, nil
+	}}
+	s := &Service{db: store, imageDir: dir, maxPictureBytes: 10 << 20}
+
+	input := models.CreateRecipe{
+		Title: "Pancakes", Description: "d", Quantity: 1, Kind: models.RecipeKinds[0],
+		Ingredients: []models.Ingredient{{Name: "Flour"}},
+		Steps:       []models.Step{{Description: "Mix", Picture: "attacker-supplied.jpg"}},
+	}
+	created, err := s.Create(context.Background(), "author-1", input, nil, map[int]PictureUpload{0: pictureUpload(t)})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if stored.Steps[0].Picture == "attacker-supplied.jpg" || stored.Steps[0].Picture == "" {
+		t.Fatalf("Steps[0].Picture = %q, want a freshly generated filename, not the client-supplied one", stored.Steps[0].Picture)
+	}
+	if _, err := os.Stat(filepath.Join(dir, stored.Steps[0].Picture)); err != nil {
+		t.Fatalf("uploaded step picture was not written to disk: %v", err)
+	}
+	if created.Steps[0].Picture != stored.Steps[0].Picture {
+		t.Fatalf("created.Steps[0].Picture = %q, want %q", created.Steps[0].Picture, stored.Steps[0].Picture)
+	}
+}
+
+func TestCreateRejectsOutOfRangeStepPictureIndex(t *testing.T) {
+	s := &Service{db: &fakeStore{}, imageDir: t.TempDir(), maxPictureBytes: 10 << 20}
+	input := models.CreateRecipe{
+		Title: "T", Description: "d", Quantity: 1, Kind: models.RecipeKinds[0],
+		Ingredients: []models.Ingredient{{Name: "Flour"}},
+		Steps:       []models.Step{{Description: "Mix"}},
+	}
+	_, err := s.Create(context.Background(), "author-1", input, nil, map[int]PictureUpload{5: pictureUpload(t)})
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid", err)
+	}
+}
+
+func ptrObjectID() *primitive.ObjectID {
+	id := primitive.NewObjectID()
+	return &id
+}
+
+func TestMergePatchRejectsUnknownStepPicture(t *testing.T) {
+	recipe := canonicalRecipe()
+	recipe.Author = &models.UserView{Id: ptrObjectID()}
+	recipe.Steps = []models.Step{{Description: "Mix", Picture: "known.jpg"}}
+	patch := models.UpdateRecipeRequest{Steps: &[]models.Step{{Description: "Mix", Picture: "unknown.jpg"}}}
+
+	_, err := mergePatch(recipe, patch, nil)
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid", err)
+	}
+}
+
+func TestMergePatchAllowsKeepingOrDroppingKnownStepPicture(t *testing.T) {
+	recipe := canonicalRecipe()
+	recipe.Author = &models.UserView{Id: ptrObjectID()}
+	recipe.Steps = []models.Step{{Description: "Mix", Picture: "known.jpg"}}
+	patch := models.UpdateRecipeRequest{Steps: &[]models.Step{
+		{Description: "Mix", Picture: "known.jpg"},
+		{Description: "Bake"},
+	}}
+
+	merged, err := mergePatch(recipe, patch, nil)
+	if err != nil {
+		t.Fatalf("mergePatch: %v", err)
+	}
+	if merged.Steps[0].Picture != "known.jpg" {
+		t.Fatalf("Steps[0].Picture = %q, want kept known.jpg", merged.Steps[0].Picture)
+	}
+	if merged.Steps[1].Picture != "" {
+		t.Fatalf("Steps[1].Picture = %q, want empty", merged.Steps[1].Picture)
+	}
+}
+
+func TestMergePatchSkipsValidationForFreshUploadIndex(t *testing.T) {
+	recipe := canonicalRecipe()
+	recipe.Author = &models.UserView{Id: ptrObjectID()}
+	recipe.Steps = []models.Step{{Description: "Mix"}}
+	patch := models.UpdateRecipeRequest{Steps: &[]models.Step{{Description: "Mix", Picture: "whatever-will-be-overwritten.jpg"}}}
+
+	merged, err := mergePatch(recipe, patch, map[int]bool{0: true})
+	if err != nil {
+		t.Fatalf("mergePatch: %v", err)
+	}
+	if merged.Steps[0].Picture != "" {
+		t.Fatalf("Steps[0].Picture = %q, want cleared pending the fresh upload", merged.Steps[0].Picture)
+	}
+}
+
+func TestUpdateRemovesDroppedStepPictureFromDisk(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "old-step.jpg"), []byte("data"), 0o600); err != nil {
+		t.Fatalf("seed old picture: %v", err)
+	}
+	recipe := canonicalRecipe()
+	recipe.Author = &models.UserView{Id: ptrObjectID()}
+	recipe.Quantity = 1
+	recipe.Kind = models.RecipeKinds[0]
+	recipe.Ingredients = []models.Ingredient{{Name: "Flour"}}
+	recipe.Steps = []models.Step{{Description: "Mix", Picture: "old-step.jpg"}}
+	store := &fakeStore{replaceRecipeByIdFn: func(_ string, r models.RecipeDB) (models.Recipe, error) {
+		return models.Recipe{Id: recipe.Id, SourceHash: r.SourceHash, Steps: r.Steps}, nil
+	}}
+	s := &Service{db: store, imageDir: dir, maxPictureBytes: 10 << 20}
+
+	patch := models.UpdateRecipeRequest{Steps: &[]models.Step{{Description: "Mix"}}}
+	if _, err := s.Update(context.Background(), recipe, patch, nil, nil); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "old-step.jpg")); !os.IsNotExist(err) {
+		t.Fatalf("old-step.jpg still exists after being dropped, err = %v", err)
+	}
+}
+
+func TestUpdateWritesNewStepPictureAtGivenIndex(t *testing.T) {
+	dir := t.TempDir()
+	recipe := canonicalRecipe()
+	recipe.Author = &models.UserView{Id: ptrObjectID()}
+	recipe.Quantity = 1
+	recipe.Kind = models.RecipeKinds[0]
+	recipe.Ingredients = []models.Ingredient{{Name: "Flour"}}
+	recipe.Steps = []models.Step{{Description: "Mix"}}
+	var storedSteps []models.Step
+	store := &fakeStore{replaceRecipeByIdFn: func(_ string, r models.RecipeDB) (models.Recipe, error) {
+		storedSteps = r.Steps
+		return models.Recipe{Id: recipe.Id, SourceHash: r.SourceHash, Steps: r.Steps}, nil
+	}}
+	s := &Service{db: store, imageDir: dir, maxPictureBytes: 10 << 20}
+
+	patch := models.UpdateRecipeRequest{Steps: &[]models.Step{{Description: "Mix"}}}
+	if _, err := s.Update(context.Background(), recipe, patch, nil, map[int]PictureUpload{0: pictureUpload(t)}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if storedSteps[0].Picture == "" {
+		t.Fatal("Steps[0].Picture is empty, want the freshly uploaded filename")
+	}
+	if _, err := os.Stat(filepath.Join(dir, storedSteps[0].Picture)); err != nil {
+		t.Fatalf("new step picture was not written to disk: %v", err)
+	}
+}
+
+func TestDeleteRemovesStepPicturesFromDisk(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "step-pic.jpg"), []byte("data"), 0o600); err != nil {
+		t.Fatalf("seed picture: %v", err)
+	}
+	id := primitive.NewObjectID().Hex()
+	store := &fakeStore{
+		getFavoriteInfoFn: func(ids []string, userID string) (map[string]models.FavoriteInfo, error) {
+			return map[string]models.FavoriteInfo{}, nil
+		},
+		deleteRecipeByIdFn: func(string) (models.RecipeDB, error) {
+			return models.RecipeDB{Steps: []models.Step{{Description: "Mix", Picture: "step-pic.jpg"}}}, nil
+		},
+	}
+	s := &Service{db: store, imageDir: dir}
+
+	if _, err := s.Delete(context.Background(), id); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "step-pic.jpg")); !os.IsNotExist(err) {
+		t.Fatalf("step-pic.jpg still exists after recipe deletion, err = %v", err)
 	}
 }

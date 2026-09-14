@@ -3,10 +3,12 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/labstack/echo/v4"
@@ -18,6 +20,11 @@ import (
 )
 
 const maxRecipeRequestBytes = 90 << 20
+
+// stepPictureFieldPrefix names the multipart file field for a new picture on
+// one step, e.g. "step_picture_2" for the step at index 2 in the submitted
+// steps array.
+const stepPictureFieldPrefix = "step_picture_"
 
 func recipeServiceError(err error, c echo.Context) error {
 	switch {
@@ -59,40 +66,74 @@ func readPictureParts(files []*multipart.FileHeader) ([]recipe_service.PictureUp
 	return pictures, nil
 }
 
-func bindRecipeRequest(c echo.Context, target any) ([]recipe_service.PictureUpload, error) {
+// readStepPictureParts collects the "step_picture_<index>" file fields into a
+// map keyed by step index. Any other field name is ignored (it belongs to
+// "pictures" or is a stray part).
+func readStepPictureParts(files map[string][]*multipart.FileHeader) (map[int]recipe_service.PictureUpload, error) {
+	result := make(map[int]recipe_service.PictureUpload)
+	for name, headers := range files {
+		suffix, ok := strings.CutPrefix(name, stepPictureFieldPrefix)
+		if !ok {
+			continue
+		}
+		if len(headers) != 1 {
+			return nil, fmt.Errorf("field %q must carry exactly one file", name)
+		}
+		index, err := strconv.Atoi(suffix)
+		if err != nil || index < 0 {
+			return nil, fmt.Errorf("invalid step picture field %q", name)
+		}
+		pictures, err := readPictureParts(headers)
+		if err != nil {
+			return nil, err
+		}
+		result[index] = pictures[0]
+	}
+	return result, nil
+}
+
+func bindRecipeRequest(c echo.Context, target any) ([]recipe_service.PictureUpload, map[int]recipe_service.PictureUpload, error) {
 	mediaType, _, err := mime.ParseMediaType(c.Request().Header.Get(echo.HeaderContentType))
 	if err != nil {
-		return nil, echo.NewHTTPError(http.StatusUnsupportedMediaType, "missing or invalid content type")
+		return nil, nil, echo.NewHTTPError(http.StatusUnsupportedMediaType, "missing or invalid content type")
 	}
 	switch mediaType {
 	case echo.MIMEApplicationJSON:
 		decoder := json.NewDecoder(io.LimitReader(c.Request().Body, maxRecipeRequestBytes+1))
 		if err := decoder.Decode(target); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if err := decoder.Decode(&struct{}{}); err != io.EOF {
-			return nil, errors.New("request body must contain one JSON object")
+			return nil, nil, errors.New("request body must contain one JSON object")
 		}
-		return nil, nil
+		return nil, nil, nil
 	case echo.MIMEMultipartForm:
 		if err := c.Request().ParseMultipartForm(maxRecipeRequestBytes); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		defer c.Request().MultipartForm.RemoveAll()
 		recipeJSON := c.FormValue("recipe")
 		if strings.TrimSpace(recipeJSON) == "" {
-			return nil, errors.New("multipart field recipe is required")
+			return nil, nil, errors.New("multipart field recipe is required")
 		}
 		decoder := json.NewDecoder(strings.NewReader(recipeJSON))
 		if err := decoder.Decode(target); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if err := decoder.Decode(&struct{}{}); err != io.EOF {
-			return nil, errors.New("recipe field must contain one JSON object")
+			return nil, nil, errors.New("recipe field must contain one JSON object")
 		}
-		return readPictureParts(c.Request().MultipartForm.File["pictures"])
+		pictures, err := readPictureParts(c.Request().MultipartForm.File["pictures"])
+		if err != nil {
+			return nil, nil, err
+		}
+		stepPictures, err := readStepPictureParts(c.Request().MultipartForm.File)
+		if err != nil {
+			return nil, nil, err
+		}
+		return pictures, stepPictures, nil
 	default:
-		return nil, echo.NewHTTPError(http.StatusUnsupportedMediaType, "use application/json or multipart/form-data")
+		return nil, nil, echo.NewHTTPError(http.StatusUnsupportedMediaType, "use application/json or multipart/form-data")
 	}
 }
 
@@ -100,7 +141,7 @@ func bindRecipeRequest(c echo.Context, target any) ([]recipe_service.PictureUplo
 // `recipe` field and zero or more `pictures` file fields.
 func (h *Handlers) CreateRecipe(c echo.Context) error {
 	var body models.CreateRecipe
-	pictures, err := bindRecipeRequest(c, &body)
+	pictures, stepPictures, err := bindRecipeRequest(c, &body)
 	if err != nil {
 		var httpErr *echo.HTTPError
 		if errors.As(err, &httpErr) {
@@ -113,7 +154,7 @@ func (h *Handlers) CreateRecipe(c echo.Context) error {
 		return errorResponse(http.StatusBadRequest, err.Error(), nil, c)
 	}
 	jwt := jwt_manager.GetJwt[*models.TokenClaims](c)
-	recipe, err := h.recipes.Create(c.Request().Context(), jwt.UserId, body, pictures)
+	recipe, err := h.recipes.Create(c.Request().Context(), jwt.UserId, body, pictures, stepPictures)
 	if err != nil {
 		return recipeServiceError(err, c)
 	}
@@ -195,7 +236,7 @@ func (h *Handlers) UnfavoriteRecipe(c echo.Context) error {
 
 func (h *Handlers) UpdateRecipe(c echo.Context) error {
 	var body models.UpdateRecipeRequest
-	pictures, err := bindRecipeRequest(c, &body)
+	pictures, stepPictures, err := bindRecipeRequest(c, &body)
 	if err != nil {
 		var httpErr *echo.HTTPError
 		if errors.As(err, &httpErr) {
@@ -205,7 +246,7 @@ func (h *Handlers) UpdateRecipe(c echo.Context) error {
 		return errorResponse(http.StatusBadRequest, err.Error(), nil, c)
 	}
 	recipe := c.Get("recipe").(models.Recipe)
-	updated, err := h.recipes.Update(c.Request().Context(), recipe, body, pictures)
+	updated, err := h.recipes.Update(c.Request().Context(), recipe, body, pictures, stepPictures)
 	if err != nil {
 		return recipeServiceError(err, c)
 	}

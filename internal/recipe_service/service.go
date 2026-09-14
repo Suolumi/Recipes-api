@@ -234,12 +234,64 @@ func (s *Service) removePictures(filenames []string) {
 	}
 }
 
-func (s *Service) Create(ctx context.Context, authorID string, input models.CreateRecipe, pictures []PictureUpload) (models.Recipe, error) {
+// stepPictureUploads validates that every upload's step index is within
+// range and returns the uploads in deterministic (ascending index) order,
+// paired with which step index each belongs to.
+func (s *Service) stepPictureUploads(uploads map[int]PictureUpload, stepCount int) ([]int, []PictureUpload, error) {
+	if len(uploads) == 0 {
+		return nil, nil, nil
+	}
+	indices := make([]int, 0, len(uploads))
+	for i := range uploads {
+		if i < 0 || i >= stepCount {
+			return nil, nil, fmt.Errorf("%w: step picture index %d is out of range", ErrInvalid, i)
+		}
+		indices = append(indices, i)
+	}
+	slices.Sort(indices)
+	result := make([]PictureUpload, len(indices))
+	for j, i := range indices {
+		result[j] = uploads[i]
+	}
+	return indices, result, nil
+}
+
+// normalizeAndWriteAllPictures normalizes recipe-level pictures and step
+// pictures together (so s.maxPictureBytes caps their combined size) and
+// writes them all in one batch, so a failure partway through cleans up
+// everything already written. It returns the recipe-level filenames and,
+// separately, the step index/filename pairs to assign onto steps.
+func (s *Service) normalizeAndWriteAllPictures(pictures []PictureUpload, stepUploads []PictureUpload, stepIndices []int) ([]string, map[int]string, error) {
+	combined := make([]PictureUpload, 0, len(pictures)+len(stepUploads))
+	combined = append(combined, pictures...)
+	combined = append(combined, stepUploads...)
+	normalized, err := s.normalizePictures(combined)
+	if err != nil {
+		return nil, nil, err
+	}
+	written, err := s.writePictures(normalized)
+	if err != nil {
+		return nil, nil, err
+	}
+	recipeFilenames := written[:len(pictures)]
+	stepFilenames := make(map[int]string, len(stepIndices))
+	for j, filename := range written[len(pictures):] {
+		stepFilenames[stepIndices[j]] = filename
+	}
+	return recipeFilenames, stepFilenames, nil
+}
+
+func (s *Service) Create(ctx context.Context, authorID string, input models.CreateRecipe, pictures []PictureUpload, stepPictures map[int]PictureUpload) (models.Recipe, error) {
 	locale, err := normalizeLocale(input.SourceLocale)
 	if err != nil {
 		return models.Recipe{}, err
 	}
 	input.SourceLocale = locale
+	// Nothing exists yet on create: a step's picture can only come from a
+	// fresh upload correlated by index below, never a client-supplied value.
+	for i := range input.Steps {
+		input.Steps[i].Picture = ""
+	}
 	recipeDB := models.RecipeDB{
 		Title: input.Title, Description: input.Description, Quantity: input.Quantity, Kind: input.Kind,
 		PreparationTime: input.PreparationTime, CookingTime: input.CookingTime, RestingTime: input.RestingTime,
@@ -254,22 +306,23 @@ func (s *Service) Create(ctx context.Context, authorID string, input models.Crea
 	if err := validateRecipe(&recipeDB); err != nil {
 		return models.Recipe{}, err
 	}
-	normalized, err := s.normalizePictures(pictures)
+	stepIndices, stepUploads, err := s.stepPictureUploads(stepPictures, len(recipeDB.Steps))
 	if err != nil {
 		return models.Recipe{}, err
 	}
-	for _, picture := range normalized {
-		recipeDB.Pictures = append(recipeDB.Pictures, picture.filename)
+	recipeFilenames, stepFilenames, err := s.normalizeAndWriteAllPictures(pictures, stepUploads, stepIndices)
+	if err != nil {
+		return models.Recipe{}, err
+	}
+	recipeDB.Pictures = append(recipeDB.Pictures, recipeFilenames...)
+	for index, filename := range stepFilenames {
+		recipeDB.Steps[index].Picture = filename
 	}
 	recipeDB.SourceHash = sourceHash(recipeDB)
-	written, err := s.writePictures(normalized)
-	if err != nil {
-		return models.Recipe{}, err
-	}
 	create := utils.DupStruct[models.CreateRecipe](&recipeDB)
 	created, err := s.db.CreateRecipe(authorID, &create)
 	if err != nil {
-		s.removePictures(written)
+		s.removePictures(append(recipeFilenames, mapValues(stepFilenames)...))
 		return models.Recipe{}, err
 	}
 	s.scheduleTranslations(created)
@@ -277,7 +330,20 @@ func (s *Service) Create(ctx context.Context, authorID string, input models.Crea
 	return created, nil
 }
 
-func mergePatch(recipe models.Recipe, patch models.UpdateRecipeRequest) (models.RecipeDB, error) {
+// mapValues returns m's values in unspecified order.
+func mapValues[K comparable, V any](m map[K]V) []V {
+	values := make([]V, 0, len(m))
+	for _, v := range m {
+		values = append(values, v)
+	}
+	return values
+}
+
+// mergePatch applies patch onto recipe. freshStepPictures holds the step
+// indices that have a new picture upload pending in this request: their
+// patch-supplied Picture value is ignored (it will be overwritten with the
+// upload's filename once normalized) rather than validated as a keep.
+func mergePatch(recipe models.Recipe, patch models.UpdateRecipeRequest, freshStepPictures map[int]bool) (models.RecipeDB, error) {
 	merged := recipe.ToRecipeDB()
 	merged.Locale = ""
 	if patch.Title != nil {
@@ -306,6 +372,21 @@ func mergePatch(recipe models.Recipe, patch models.UpdateRecipeRequest) (models.
 	}
 	if patch.Steps != nil {
 		merged.Steps = slices.Clone(*patch.Steps)
+		available := make(map[string]bool, len(recipe.Steps))
+		for _, step := range recipe.Steps {
+			if step.Picture != "" {
+				available[step.Picture] = true
+			}
+		}
+		for i := range merged.Steps {
+			if freshStepPictures[i] {
+				merged.Steps[i].Picture = ""
+				continue
+			}
+			if merged.Steps[i].Picture != "" && !available[merged.Steps[i].Picture] {
+				return models.RecipeDB{}, fmt.Errorf("%w: step %d references an unknown picture", ErrInvalid, i)
+			}
+		}
 	}
 	if patch.Locale != nil {
 		merged.SourceLocale = *patch.Locale
@@ -328,29 +409,34 @@ func mergePatch(recipe models.Recipe, patch models.UpdateRecipeRequest) (models.
 	return merged, nil
 }
 
-func (s *Service) Update(ctx context.Context, recipe models.Recipe, patch models.UpdateRecipeRequest, pictures []PictureUpload) (models.Recipe, error) {
-	merged, err := mergePatch(recipe, patch)
+func (s *Service) Update(ctx context.Context, recipe models.Recipe, patch models.UpdateRecipeRequest, pictures []PictureUpload, stepPictures map[int]PictureUpload) (models.Recipe, error) {
+	freshStepPictures := make(map[int]bool, len(stepPictures))
+	for i := range stepPictures {
+		freshStepPictures[i] = true
+	}
+	merged, err := mergePatch(recipe, patch, freshStepPictures)
 	if err != nil {
 		return models.Recipe{}, err
-	}
-	normalized, err := s.normalizePictures(pictures)
-	if err != nil {
-		return models.Recipe{}, err
-	}
-	for _, picture := range normalized {
-		merged.Pictures = append(merged.Pictures, picture.filename)
 	}
 	if err := validateRecipe(&merged); err != nil {
 		return models.Recipe{}, err
 	}
-	merged.SourceHash = sourceHash(merged)
-	written, err := s.writePictures(normalized)
+	stepIndices, stepUploads, err := s.stepPictureUploads(stepPictures, len(merged.Steps))
 	if err != nil {
 		return models.Recipe{}, err
 	}
+	recipeFilenames, stepFilenames, err := s.normalizeAndWriteAllPictures(pictures, stepUploads, stepIndices)
+	if err != nil {
+		return models.Recipe{}, err
+	}
+	merged.Pictures = append(merged.Pictures, recipeFilenames...)
+	for index, filename := range stepFilenames {
+		merged.Steps[index].Picture = filename
+	}
+	merged.SourceHash = sourceHash(merged)
 	updated, err := s.db.ReplaceRecipeById(ctx, recipe.Id.Hex(), merged)
 	if err != nil {
-		s.removePictures(written)
+		s.removePictures(append(recipeFilenames, mapValues(stepFilenames)...))
 		return models.Recipe{}, err
 	}
 	kept := make(map[string]bool, len(updated.Pictures))
@@ -360,6 +446,17 @@ func (s *Service) Update(ctx context.Context, recipe models.Recipe, patch models
 	for _, id := range recipe.Pictures {
 		if !kept[id] {
 			_ = images_manager.Remove(s.imageDir, id)
+		}
+	}
+	keptSteps := make(map[string]bool, len(updated.Steps))
+	for _, step := range updated.Steps {
+		if step.Picture != "" {
+			keptSteps[step.Picture] = true
+		}
+	}
+	for _, step := range recipe.Steps {
+		if step.Picture != "" && !keptSteps[step.Picture] {
+			_ = images_manager.Remove(s.imageDir, step.Picture)
 		}
 	}
 	_ = s.db.DeleteLocalizedRecipesByID(ctx, recipe.Id.Hex())
@@ -634,6 +731,11 @@ func (s *Service) Delete(ctx context.Context, recipeID string) (models.RecipeDB,
 	}
 	for _, picture := range deleted.Pictures {
 		_ = images_manager.Remove(s.imageDir, picture)
+	}
+	for _, step := range deleted.Steps {
+		if step.Picture != "" {
+			_ = images_manager.Remove(s.imageDir, step.Picture)
+		}
 	}
 	_ = s.db.DeleteLocalizedRecipesByID(ctx, recipeID)
 	_ = s.db.DeleteFavoritesByRecipeID(ctx, recipeID)

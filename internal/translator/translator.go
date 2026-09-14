@@ -91,6 +91,7 @@ func (t *Translator) TranslateRecipe(recipe models.Recipe, to string) (models.Re
 		st = append(st, models.Step{
 			Title:       stTitle[i].Text,
 			Description: stDesc[i].Text,
+			Picture:     recipe.Steps[i].Picture,
 		})
 	}
 	return models.Recipe{

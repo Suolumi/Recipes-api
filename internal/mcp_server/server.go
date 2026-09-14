@@ -66,6 +66,15 @@ type PictureOutput struct {
 	URL string `json:"url"`
 }
 
+// StepOutput mirrors models.Step but resolves Picture to a full URL (like
+// PictureOutput does for recipe-level pictures) instead of a bare filename,
+// which is meaningless to a caller without the server's picture base URL.
+type StepOutput struct {
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description"`
+	Picture     string `json:"picture,omitempty"`
+}
+
 type RecipeOutput struct {
 	ID              string              `json:"id"`
 	Title           string              `json:"title"`
@@ -76,7 +85,7 @@ type RecipeOutput struct {
 	CookingTime     int                 `json:"cooking_time"`
 	RestingTime     int                 `json:"resting_time"`
 	Ingredients     []models.Ingredient `json:"ingredients"`
-	Steps           []models.Step       `json:"steps"`
+	Steps           []StepOutput        `json:"steps"`
 	Pictures        []PictureOutput     `json:"pictures"`
 	SourceLocale    string              `json:"source_locale,omitempty"`
 	Locale          string              `json:"locale,omitempty"`
@@ -189,11 +198,23 @@ func encodeCursor(cursor string) string {
 	return base64.RawURLEncoding.EncodeToString(id[:])
 }
 
+func (s *Server) stepOutputs(steps []models.Step) []StepOutput {
+	outputs := make([]StepOutput, 0, len(steps))
+	for _, step := range steps {
+		output := StepOutput{Title: step.Title, Description: step.Description}
+		if step.Picture != "" {
+			output.Picture = s.pictureBase + step.Picture
+		}
+		outputs = append(outputs, output)
+	}
+	return outputs
+}
+
 func (s *Server) recipeOutput(recipe models.Recipe) RecipeOutput {
 	output := RecipeOutput{
 		Title: recipe.Title, Description: recipe.Description, Quantity: recipe.Quantity, Kind: recipe.Kind,
 		PreparationTime: recipe.PreparationTime, CookingTime: recipe.CookingTime, RestingTime: recipe.RestingTime,
-		Ingredients: recipe.Ingredients, Steps: recipe.Steps, SourceLocale: recipe.SourceLocale, Locale: recipe.Locale,
+		Ingredients: recipe.Ingredients, Steps: s.stepOutputs(recipe.Steps), SourceLocale: recipe.SourceLocale, Locale: recipe.Locale,
 		Pictures: []PictureOutput{},
 	}
 	if recipe.Id != nil {
@@ -276,7 +297,7 @@ func (s *Server) create(ctx context.Context, req *mcp.CallToolRequest, input Cre
 		Title: input.Title, Description: input.Description, Quantity: input.Quantity, Kind: input.Kind,
 		PreparationTime: input.PreparationTime, CookingTime: input.CookingTime, RestingTime: input.RestingTime,
 		Ingredients: input.Ingredients, Steps: input.Steps, SourceLocale: input.Locale,
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		return nil, RecipeOutput{}, err
 	}
@@ -296,7 +317,7 @@ func (s *Server) update(ctx context.Context, req *mcp.CallToolRequest, input Upd
 		Title: input.Title, Description: input.Description, Quantity: input.Quantity, Kind: input.Kind,
 		PreparationTime: input.PreparationTime, CookingTime: input.CookingTime, RestingTime: input.RestingTime,
 		Ingredients: input.Ingredients, Steps: input.Steps, Locale: input.Locale, KeepPictureIDs: input.KeepPictureIDs,
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		return nil, RecipeOutput{}, err
 	}

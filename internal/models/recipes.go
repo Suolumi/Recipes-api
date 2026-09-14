@@ -189,4 +189,5 @@ type Ingredient struct {
 type Step struct {
 	Title       string `bson:"title,omitempty" json:"title"`
 	Description string `bson:"description,omitempty" json:"description"`
+	Picture     string `bson:"picture,omitempty" json:"picture,omitempty" jsonschema:"Filename of an existing picture already attached to one of this recipe's steps, or empty. New pictures cannot be uploaded through MCP; attach photos via the website."`
 }
