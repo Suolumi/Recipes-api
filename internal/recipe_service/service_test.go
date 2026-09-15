@@ -156,6 +156,12 @@ func (f *fakeStore) HasIncomingReferences(_ context.Context, recipeID string) (b
 	}
 	return false, nil
 }
+func (f *fakeStore) GetRecipeTitles(_ context.Context, ids []string) (map[string]string, error) {
+	if f.getRecipeTitlesFn != nil {
+		return f.getRecipeTitlesFn(ids)
+	}
+	return map[string]string{}, nil
+}
 
 func (f *fakeStore) AddFavorite(context.Context, string, string) error       { return nil }
 func (f *fakeStore) RemoveFavorite(context.Context, string, string) error    { return nil }
@@ -1027,6 +1033,88 @@ func TestGetDecoratesVariationCount(t *testing.T) {
 	if got.VariationCount != 2 {
 		t.Fatalf("VariationCount = %d, want 2", got.VariationCount)
 	}
+}
+
+func TestGetResolvesRefIngredientTitleWhenNoLabel(t *testing.T) {
+	canonical := canonicalRecipe()
+	refID := primitive.NewObjectID()
+	canonical.Ingredients = []models.Ingredient{{RecipeRef: &refID}}
+	store := &fakeStore{
+		getRecipeByIdFn: func(string) (models.Recipe, error) { return canonical, nil },
+		getRecipeTitlesFn: func(ids []string) (map[string]string, error) {
+			if len(ids) != 1 || ids[0] != refID.Hex() {
+				t.Fatalf("GetRecipeTitles called with %v, want [%s]", ids, refID.Hex())
+			}
+			return map[string]string{refID.Hex(): "Tarte Tatin"}, nil
+		},
+	}
+	s := &Service{db: store}
+
+	got, err := s.Get(context.Background(), canonical.Id.Hex(), "", "")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Ingredients[0].ResolvedRefTitle != "Tarte Tatin" {
+		t.Fatalf("ResolvedRefTitle = %q, want %q", got.Ingredients[0].ResolvedRefTitle, "Tarte Tatin")
+	}
+}
+
+func TestGetPrefersRefLabelOverLookup(t *testing.T) {
+	canonical := canonicalRecipe()
+	refID := primitive.NewObjectID()
+	canonical.Ingredients = []models.Ingredient{{RecipeRef: &refID, RefLabel: "the crust recipe"}}
+	store := &fakeStore{
+		getRecipeByIdFn: func(string) (models.Recipe, error) { return canonical, nil },
+		getRecipeTitlesFn: func(ids []string) (map[string]string, error) {
+			t.Fatal("GetRecipeTitles should not be called when RefLabel is set")
+			return nil, nil
+		},
+	}
+	s := &Service{db: store}
+
+	got, err := s.Get(context.Background(), canonical.Id.Hex(), "", "")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Ingredients[0].ResolvedRefTitle != "the crust recipe" {
+		t.Fatalf("ResolvedRefTitle = %q, want %q", got.Ingredients[0].ResolvedRefTitle, "the crust recipe")
+	}
+}
+
+func TestListDetailedForUserResolvesRefIngredientTitles(t *testing.T) {
+	id := ptrObjectID()
+	refID := primitive.NewObjectID()
+	store := &fakeStore{
+		getRecipeByIdFn: func(string) (models.Recipe, error) { return models.Recipe{}, nil },
+	}
+	store.getRecipeTitlesFn = func(ids []string) (map[string]string, error) {
+		return map[string]string{refID.Hex(): "Base Dough"}, nil
+	}
+	// GetRecipesByAuthor is not mockable via a func field on fakeStore; use the
+	// Store interface directly via an embedded override.
+	s := &Service{db: recipesByAuthorStore{
+		fakeStore: store,
+		recipes:   []models.Recipe{{Id: id, Ingredients: []models.Ingredient{{RecipeRef: &refID}}}},
+	}}
+
+	got, _, _, err := s.ListDetailedForUser(context.Background(), "user-1", "", 20, "")
+	if err != nil {
+		t.Fatalf("ListDetailedForUser: %v", err)
+	}
+	if len(got) != 1 || got[0].Ingredients[0].ResolvedRefTitle != "Base Dough" {
+		t.Fatalf("got %+v, want ResolvedRefTitle = Base Dough", got)
+	}
+}
+
+// recipesByAuthorStore wraps fakeStore to stub GetRecipesByAuthor, which
+// fakeStore itself always returns empty for.
+type recipesByAuthorStore struct {
+	*fakeStore
+	recipes []models.Recipe
+}
+
+func (r recipesByAuthorStore) GetRecipesByAuthor(context.Context, string, string, int) ([]models.Recipe, int64, error) {
+	return r.recipes, int64(len(r.recipes)), nil
 }
 
 func TestListUsesPerRecipeFavoritesForOwnRecipes(t *testing.T) {

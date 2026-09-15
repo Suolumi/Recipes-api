@@ -70,6 +70,7 @@ type Store interface {
 	GetVariationCounts(ctx context.Context, rootIDs []string) (map[string]int64, error)
 	RepointRecipeReferences(ctx context.Context, oldRootID, newRootID string) error
 	HasIncomingReferences(ctx context.Context, recipeID string) (bool, error)
+	GetRecipeTitles(ctx context.Context, ids []string) (map[string]string, error)
 
 	AddFavorite(ctx context.Context, userID, recipeID string) error
 	RemoveFavorite(ctx context.Context, userID, recipeID string) error
@@ -520,6 +521,7 @@ func (s *Service) GetForUser(ctx context.Context, recipeID, userID, locale strin
 	// (like Get does not) - but variation_count is still cheap and useful
 	// for an MCP client managing its own recipes, so it's decorated here.
 	s.decorateVariationCount(ctx, &localized)
+	s.decorateRefTitle(ctx, &localized)
 	return localized, nil
 }
 
@@ -544,6 +546,7 @@ func (s *Service) Get(ctx context.Context, recipeID, locale, userID string) (mod
 	// List, which has an "own recipes" per-recipe mode - see List).
 	s.decorateFamilyFavorite(ctx, &localized, userID)
 	s.decorateVariationCount(ctx, &localized)
+	s.decorateRefTitle(ctx, &localized)
 	return localized, nil
 }
 
@@ -745,6 +748,54 @@ func (s *Service) decorateVariationCounts(ctx context.Context, recipes []models.
 	}
 }
 
+// decorateRefTitles resolves ResolvedRefTitle on every recipe_ref ingredient
+// across recipes, fetching every referenced recipe's current title in one
+// batched lookup: RefLabel wins when the author set one, else the live title
+// (per Ingredient.ResolvedRefTitle's contract). Recipes are mutated in place.
+func (s *Service) decorateRefTitles(ctx context.Context, recipes []*models.Recipe) {
+	ids := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, recipe := range recipes {
+		for _, ingredient := range recipe.Ingredients {
+			if ingredient.RecipeRef == nil || ingredient.RefLabel != "" {
+				continue
+			}
+			hex := ingredient.RecipeRef.Hex()
+			if _, ok := seen[hex]; ok {
+				continue
+			}
+			seen[hex] = struct{}{}
+			ids = append(ids, hex)
+		}
+	}
+	var titles map[string]string
+	if len(ids) > 0 {
+		var err error
+		titles, err = s.db.GetRecipeTitles(ctx, ids)
+		if err != nil {
+			utils.LogError("could not load reference titles", err)
+		}
+	}
+	for _, recipe := range recipes {
+		for i := range recipe.Ingredients {
+			ingredient := &recipe.Ingredients[i]
+			if ingredient.RecipeRef == nil {
+				continue
+			}
+			if ingredient.RefLabel != "" {
+				ingredient.ResolvedRefTitle = ingredient.RefLabel
+				continue
+			}
+			ingredient.ResolvedRefTitle = titles[ingredient.RecipeRef.Hex()]
+		}
+	}
+}
+
+// decorateRefTitle is decorateRefTitles for a single recipe.
+func (s *Service) decorateRefTitle(ctx context.Context, recipe *models.Recipe) {
+	s.decorateRefTitles(ctx, []*models.Recipe{recipe})
+}
+
 func sameBaseLocale(left, right string) bool {
 	if left == "" || right == "" {
 		return false
@@ -889,6 +940,11 @@ func (s *Service) ListDetailedForUser(ctx context.Context, userID, cursor string
 	}
 	recipes := s.localizeBatch(ctx, documents, locale)
 	s.decorateVariationCounts(ctx, recipes)
+	refs := make([]*models.Recipe, len(recipes))
+	for i := range recipes {
+		refs[i] = &recipes[i]
+	}
+	s.decorateRefTitles(ctx, refs)
 	return recipes, count, next, nil
 }
 
