@@ -15,9 +15,16 @@ type GetRecipesRequest struct {
 	TotalTime       int        `query:"total_time"`
 	Ingredients     []string   `query:"ingredients,omitempty"`
 	Kind            RecipeKind `query:"kind,omitempty"`
-	Locale          string     `query:"locale,omitempty"`
-	SearchLocale    string     `query:"search_locale,omitempty"`
-	Favorite        bool       `query:"favorite,omitempty"`
+	// Category, when "diy", lists only DIY recipes on the default/family-
+	// collapsed listing; when empty or "food", that listing excludes diy
+	// (see buildRecipeFilterPipeline - this is not a generic equality
+	// filter, existing recipes predate this field and must still show up
+	// under "food"). Ignored by variation_of/own_recipes listings, which are
+	// category-agnostic by design.
+	Category     RecipeCategory `query:"category,omitempty"`
+	Locale       string         `query:"locale,omitempty"`
+	SearchLocale string         `query:"search_locale,omitempty"`
+	Favorite     bool           `query:"favorite,omitempty"`
 	// VariationOf, when set, lists only the variations of that recipe id
 	// (never the root itself) instead of the default root-only listing.
 	VariationOf string `query:"variation_of,omitempty"`
@@ -26,6 +33,11 @@ type GetRecipesRequest struct {
 	// and favorite decoration is per-recipe instead of family-aggregate. Set
 	// only by the Settings page's own-recipes fetch.
 	OwnRecipes bool `query:"own_recipes,omitempty"`
+	// ExcludeFamily hides that root id from a listing - used by the "add
+	// recipe as ingredient" picker so a recipe can't offer itself or its own
+	// family as a reference target. UX nicety only; the authoritative
+	// enforcement is recipe_service.validateIngredientRefs.
+	ExcludeFamily string `query:"exclude_family,omitempty"`
 }
 
 type GetRecipesResponse struct {
@@ -34,54 +46,67 @@ type GetRecipesResponse struct {
 }
 
 type UpdateRecipeRequest struct {
-	Title           *string       `bson:"title,omitempty" json:"title,omitempty"`
-	Description     *string       `bson:"description,omitempty" json:"description,omitempty"`
-	Quantity        *int          `bson:"quantity,omitempty" json:"quantity,omitempty"`
-	Kind            *RecipeKind   `bson:"kind,omitempty" json:"kind,omitempty"`
-	PreparationTime *int          `bson:"preparation_time,omitempty" json:"preparation_time,omitempty"`
-	CookingTime     *int          `bson:"cooking_time,omitempty" json:"cooking_time,omitempty"`
-	RestingTime     *int          `bson:"resting_time,omitempty" json:"resting_time,omitempty"`
-	Ingredients     *[]Ingredient `bson:"ingredients,omitempty" json:"ingredients,omitempty"`
-	Steps           *[]Step       `bson:"steps,omitempty" json:"steps,omitempty"`
-	Locale          *string       `bson:"source_locale,omitempty" json:"locale,omitempty"`
-	KeepPictureIDs  *[]string     `bson:"-" json:"keep_picture_ids,omitempty"`
+	Title           *string         `bson:"title,omitempty" json:"title,omitempty"`
+	Description     *string         `bson:"description,omitempty" json:"description,omitempty"`
+	Quantity        *int            `bson:"quantity,omitempty" json:"quantity,omitempty"`
+	Kind            *RecipeKind     `bson:"kind,omitempty" json:"kind,omitempty"`
+	Category        *RecipeCategory `bson:"category,omitempty" json:"category,omitempty"`
+	PreparationTime *int            `bson:"preparation_time,omitempty" json:"preparation_time,omitempty"`
+	CookingTime     *int            `bson:"cooking_time,omitempty" json:"cooking_time,omitempty"`
+	RestingTime     *int            `bson:"resting_time,omitempty" json:"resting_time,omitempty"`
+	Ingredients     *[]Ingredient   `bson:"ingredients,omitempty" json:"ingredients,omitempty"`
+	Steps           *[]Step         `bson:"steps,omitempty" json:"steps,omitempty"`
+	Locale          *string         `bson:"source_locale,omitempty" json:"locale,omitempty"`
+	KeepPictureIDs  *[]string       `bson:"-" json:"keep_picture_ids,omitempty"`
 }
 
 type RecipeKind string
 
 var RecipeKinds = []RecipeKind{
-	Snack,
+	Breakfast,
 	Starter,
 	Dish,
 	SideDish,
 	Sauce,
+	Baking,
+	Snack,
+	Plate,
 	Dessert,
 	Drink,
-	Plate,
 }
 
-const Snack = RecipeKind("snack")
+const Breakfast = RecipeKind("breakfast")
 const Starter = RecipeKind("starter")
 const Dish = RecipeKind("dish")
 const SideDish = RecipeKind("side-dish")
 const Sauce = RecipeKind("sauce")
+const Baking = RecipeKind("baking")
+const Snack = RecipeKind("snack")
+const Plate = RecipeKind("plate")
 const Dessert = RecipeKind("dessert")
 const Drink = RecipeKind("drink")
-const Plate = RecipeKind("plate")
+
+type RecipeCategory string
+
+var RecipeCategories = []RecipeCategory{Food, Diy}
+
+const Food = RecipeCategory("food")
+const Diy = RecipeCategory("diy")
 
 type CreateRecipe struct {
-	Title           string       `bson:"title,omitempty" json:"title"`
-	Description     string       `bson:"description,omitempty" json:"description"`
-	Quantity        int          `bson:"quantity,omitempty" json:"quantity"`
-	Kind            RecipeKind   `bson:"kind,omitempty" json:"kind"`
-	PreparationTime int          `bson:"preparation_time,omitempty" json:"preparation_time"`
-	CookingTime     int          `bson:"cooking_time,omitempty" json:"cooking_time"`
-	RestingTime     int          `bson:"resting_time,omitempty" json:"resting_time"`
-	Ingredients     []Ingredient `bson:"ingredients,omitempty" json:"ingredients"`
-	Steps           []Step       `bson:"steps,omitempty" json:"steps"`
-	Pictures        []string     `bson:"pictures,omitempty" json:"-"`
-	SourceLocale    string       `bson:"source_locale,omitempty" json:"locale,omitempty"`
-	SourceHash      string       `bson:"source_hash,omitempty" json:"-"`
+	Title           string         `bson:"title,omitempty" json:"title"`
+	Description     string         `bson:"description,omitempty" json:"description"`
+	Quantity        int            `bson:"quantity,omitempty" json:"quantity"`
+	Kind            RecipeKind     `bson:"kind,omitempty" json:"kind"`
+	Category        RecipeCategory `bson:"category,omitempty" json:"category"`
+	PreparationTime int            `bson:"preparation_time,omitempty" json:"preparation_time"`
+	CookingTime     int            `bson:"cooking_time,omitempty" json:"cooking_time"`
+	RestingTime     int            `bson:"resting_time,omitempty" json:"resting_time"`
+	Ingredients     []Ingredient   `bson:"ingredients,omitempty" json:"ingredients"`
+	Steps           []Step         `bson:"steps,omitempty" json:"steps"`
+	Pictures        []string       `bson:"pictures,omitempty" json:"-"`
+	SourceLocale    string         `bson:"source_locale,omitempty" json:"locale,omitempty"`
+	SourceHash      string         `bson:"source_hash,omitempty" json:"-"`
 	// VariationOf, on the way in, is the id of the recipe being forked; the
 	// service resolves it to that recipe's root (flattening a
 	// variation-of-a-variation) before it's ever persisted. Must stay the
@@ -100,6 +125,7 @@ type RecipeDB struct {
 	Description     string              `bson:"description,omitempty" json:"description"`
 	Quantity        int                 `bson:"quantity,omitempty" json:"quantity"`
 	Kind            RecipeKind          `bson:"kind,omitempty" json:"kind"`
+	Category        RecipeCategory      `bson:"category,omitempty" json:"category"`
 	PreparationTime int                 `bson:"preparation_time,omitempty" json:"preparation_time"`
 	CookingTime     int                 `bson:"cooking_time,omitempty" json:"cooking_time"`
 	RestingTime     int                 `bson:"resting_time,omitempty" json:"resting_time"`
@@ -122,6 +148,7 @@ type Recipe struct {
 	Description     string              `bson:"description,omitempty" json:"description"`
 	Quantity        int                 `bson:"quantity,omitempty" json:"quantity"`
 	Kind            RecipeKind          `bson:"kind,omitempty" json:"kind"`
+	Category        RecipeCategory      `bson:"category,omitempty" json:"category"`
 	PreparationTime int                 `bson:"preparation_time,omitempty" json:"preparation_time"`
 	CookingTime     int                 `bson:"cooking_time,omitempty" json:"cooking_time"`
 	RestingTime     int                 `bson:"resting_time,omitempty" json:"resting_time"`
@@ -162,6 +189,7 @@ func (r *Recipe) ToRecipeDB() RecipeDB {
 		Description:     r.Description,
 		Quantity:        r.Quantity,
 		Kind:            r.Kind,
+		Category:        r.Category,
 		PreparationTime: r.PreparationTime,
 		CookingTime:     r.CookingTime,
 		RestingTime:     r.RestingTime,
@@ -184,6 +212,7 @@ type RecipePreview struct {
 	CookingTime     int                 `bson:"cooking_time,omitempty" json:"cooking_time"`
 	RestingTime     int                 `bson:"resting_time,omitempty" json:"resting_time"`
 	Kind            RecipeKind          `bson:"kind,omitempty" json:"kind"`
+	Category        RecipeCategory      `bson:"category,omitempty" json:"category"`
 	Quantity        int                 `bson:"quantity,omitempty" json:"quantity"`
 	Pictures        []string            `bson:"pictures,omitempty" json:"pictures"`
 	SourceLocale    string              `bson:"source_locale,omitempty" json:"source_locale,omitempty"`
@@ -210,6 +239,26 @@ type Ingredient struct {
 	Quantity float64 `bson:"quantity,omitempty" json:"quantity" jsonschema:"Numeric amount, e.g. 3 or 0.5"`
 	Unit     string  `bson:"unit,omitempty" json:"unit" jsonschema:"Optional unit shown between quantity and name. Leave empty for a bare count, e.g. quantity 3 + name 'Egg' renders as '3 Egg'. Set it for a unit of measure or descriptor, e.g. quantity 3 + unit 'leaves' + name 'Thyme' renders as '3 leaves - Thyme'"`
 	Label    string  `bson:"label,omitempty" json:"label" jsonschema:"Optional section heading grouping this ingredient with others that share the exact same label, e.g. 'For the dough' or 'For the filling'. Leave empty for ingredients that don't belong to a named section. Reuse the identical label text (same wording and case) on every ingredient meant to share a section - matching is normalized server-side but exact reuse is still the reliable way to keep a group together."`
+
+	// RecipeRef, when set, makes this ingredient a reference to another
+	// recipe's root/family instead of free text - Quantity/Unit still mean
+	// "how much of that sub-recipe", scaling with the parent's serving
+	// scaler like any other ingredient. Always a root id, normalized (never
+	// a specific variation) server-side on write, mirroring
+	// CreateRecipe.VariationOf's one-hop flatten. Mutually exclusive with
+	// Name, which is cleared server-side when this is set.
+	RecipeRef *primitive.ObjectID `bson:"recipe_ref,omitempty" json:"recipe_ref,omitempty"`
+	// RefLabel is an optional custom display label for a reference
+	// ingredient (e.g. "Tarte Dough"); blank falls back to the referenced
+	// recipe's live current title. Cleared server-side when RecipeRef is
+	// nil. Translated on write through the same pipeline as Name/Unit/Label.
+	RefLabel string `bson:"ref_label,omitempty" json:"ref_label,omitempty"`
+	// ResolvedRefTitle is decorated post-fetch only (never persisted) -
+	// RefLabel if the author set one, else the referenced recipe's live
+	// current title, resolved fresh on every read (same bson:"-" pattern as
+	// Recipe.VariationCount) so a renamed sub-recipe shows correctly
+	// everywhere with no migration. Empty when RecipeRef is nil.
+	ResolvedRefTitle string `bson:"-" json:"resolved_ref_title,omitempty"`
 }
 
 type Step struct {

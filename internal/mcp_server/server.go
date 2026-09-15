@@ -33,32 +33,53 @@ type GetInput struct {
 	Locale   string `json:"locale,omitempty" jsonschema:"Requested BCP 47 locale; canonical recipe is returned if translation fails"`
 }
 
+// IngredientInput is what create_recipe/update_recipe accept: no recipe_ref
+// field exists here, so a client cannot set a recipe reference through MCP
+// in v1 - there is no tool to discover another recipe's id to reference,
+// same precedent as variation_of never being settable through create/update.
+type IngredientInput struct {
+	Name     string  `json:"name" jsonschema:"Ingredient name, e.g. 'Egg' or 'Thyme'"`
+	Quantity float64 `json:"quantity" jsonschema:"Numeric amount, e.g. 3 or 0.5"`
+	Unit     string  `json:"unit,omitempty" jsonschema:"Optional unit shown between quantity and name. Leave empty for a bare count, e.g. quantity 3 + name 'Egg' renders as '3 Egg'. Set it for a unit of measure or descriptor, e.g. quantity 3 + unit 'leaves' + name 'Thyme' renders as '3 leaves - Thyme'"`
+	Label    string  `json:"label,omitempty" jsonschema:"Optional section heading grouping this ingredient with others that share the exact same label, e.g. 'For the dough' or 'For the filling'."`
+}
+
+func ingredientsFromInput(inputs []IngredientInput) []models.Ingredient {
+	result := make([]models.Ingredient, 0, len(inputs))
+	for _, in := range inputs {
+		result = append(result, models.Ingredient{Name: in.Name, Quantity: in.Quantity, Unit: in.Unit, Label: in.Label})
+	}
+	return result
+}
+
 type CreateInput struct {
-	Title           string              `json:"title"`
-	Description     string              `json:"description,omitempty"`
-	Quantity        int                 `json:"quantity"`
-	Kind            models.RecipeKind   `json:"kind" jsonschema:"One of snack, starter, dish, side-dish, sauce, dessert, drink, or plate"`
-	PreparationTime int                 `json:"preparation_time"`
-	CookingTime     int                 `json:"cooking_time"`
-	RestingTime     int                 `json:"resting_time"`
-	Ingredients     []models.Ingredient `json:"ingredients"`
-	Steps           []models.Step       `json:"steps"`
-	Locale          string              `json:"locale,omitempty" jsonschema:"BCP 47 locale of the canonical recipe; detected when omitted"`
+	Title           string                `json:"title"`
+	Description     string                `json:"description,omitempty"`
+	Quantity        int                   `json:"quantity"`
+	Kind            models.RecipeKind     `json:"kind" jsonschema:"One of breakfast, starter, dish, side-dish, sauce, baking, snack, plate, dessert, or drink; required only when category is food, ignored for diy"`
+	Category        models.RecipeCategory `json:"category,omitempty" jsonschema:"One of food or diy; defaults to food when omitted. diy skips the kind requirement (course concept doesn't apply) and the website shows DIY-flavored terminology (materials instead of ingredients, etc.)"`
+	PreparationTime int                   `json:"preparation_time"`
+	CookingTime     int                   `json:"cooking_time"`
+	RestingTime     int                   `json:"resting_time"`
+	Ingredients     []IngredientInput     `json:"ingredients"`
+	Steps           []models.Step         `json:"steps"`
+	Locale          string                `json:"locale,omitempty" jsonschema:"BCP 47 locale of the canonical recipe; detected when omitted"`
 }
 
 type UpdateInput struct {
-	RecipeID        string               `json:"recipe_id"`
-	Title           *string              `json:"title,omitempty"`
-	Description     *string              `json:"description,omitempty"`
-	Quantity        *int                 `json:"quantity,omitempty"`
-	Kind            *models.RecipeKind   `json:"kind,omitempty"`
-	PreparationTime *int                 `json:"preparation_time,omitempty"`
-	CookingTime     *int                 `json:"cooking_time,omitempty"`
-	RestingTime     *int                 `json:"resting_time,omitempty"`
-	Ingredients     *[]models.Ingredient `json:"ingredients,omitempty"`
-	Steps           *[]models.Step       `json:"steps,omitempty"`
-	Locale          *string              `json:"locale,omitempty" jsonschema:"BCP 47 locale of the canonical recipe"`
-	KeepPictureIDs  *[]string            `json:"keep_picture_ids,omitempty" jsonschema:"Ordered existing picture IDs to retain; omit to keep all, or pass an empty list to remove all"`
+	RecipeID        string                 `json:"recipe_id"`
+	Title           *string                `json:"title,omitempty"`
+	Description     *string                `json:"description,omitempty"`
+	Quantity        *int                   `json:"quantity,omitempty"`
+	Kind            *models.RecipeKind     `json:"kind,omitempty"`
+	Category        *models.RecipeCategory `json:"category,omitempty"`
+	PreparationTime *int                   `json:"preparation_time,omitempty"`
+	CookingTime     *int                   `json:"cooking_time,omitempty"`
+	RestingTime     *int                   `json:"resting_time,omitempty"`
+	Ingredients     *[]IngredientInput     `json:"ingredients,omitempty"`
+	Steps           *[]models.Step         `json:"steps,omitempty"`
+	Locale          *string                `json:"locale,omitempty" jsonschema:"BCP 47 locale of the canonical recipe"`
+	KeepPictureIDs  *[]string              `json:"keep_picture_ids,omitempty" jsonschema:"Ordered existing picture IDs to retain; omit to keep all, or pass an empty list to remove all"`
 }
 
 type PictureOutput struct {
@@ -75,20 +96,52 @@ type StepOutput struct {
 	Picture     string `json:"picture,omitempty"`
 }
 
+// RecipeRefOutput is a reference ingredient's resolved target.
+type RecipeRefOutput struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+// IngredientOutput mirrors models.Ingredient for get_my_recipe/
+// list_my_recipes, but resolves a reference ingredient's target into
+// {id, title} alongside the existing top-level Quantity/Unit, so a
+// reference ingredient reads as complete {id, title, quantity, unit} data
+// without the client needing a second call.
+type IngredientOutput struct {
+	Name      string           `json:"name,omitempty"`
+	Quantity  float64          `json:"quantity"`
+	Unit      string           `json:"unit,omitempty"`
+	Label     string           `json:"label,omitempty"`
+	RecipeRef *RecipeRefOutput `json:"recipe_ref,omitempty"`
+}
+
+func ingredientOutputs(ingredients []models.Ingredient) []IngredientOutput {
+	outputs := make([]IngredientOutput, 0, len(ingredients))
+	for _, ingredient := range ingredients {
+		output := IngredientOutput{Name: ingredient.Name, Quantity: ingredient.Quantity, Unit: ingredient.Unit, Label: ingredient.Label}
+		if ingredient.RecipeRef != nil {
+			output.RecipeRef = &RecipeRefOutput{ID: ingredient.RecipeRef.Hex(), Title: ingredient.ResolvedRefTitle}
+		}
+		outputs = append(outputs, output)
+	}
+	return outputs
+}
+
 type RecipeOutput struct {
-	ID              string              `json:"id"`
-	Title           string              `json:"title"`
-	Description     string              `json:"description"`
-	Quantity        int                 `json:"quantity"`
-	Kind            models.RecipeKind   `json:"kind"`
-	PreparationTime int                 `json:"preparation_time"`
-	CookingTime     int                 `json:"cooking_time"`
-	RestingTime     int                 `json:"resting_time"`
-	Ingredients     []models.Ingredient `json:"ingredients"`
-	Steps           []StepOutput        `json:"steps"`
-	Pictures        []PictureOutput     `json:"pictures"`
-	SourceLocale    string              `json:"source_locale,omitempty"`
-	Locale          string              `json:"locale,omitempty"`
+	ID              string                `json:"id"`
+	Title           string                `json:"title"`
+	Description     string                `json:"description"`
+	Quantity        int                   `json:"quantity"`
+	Kind            models.RecipeKind     `json:"kind"`
+	Category        models.RecipeCategory `json:"category"`
+	PreparationTime int                   `json:"preparation_time"`
+	CookingTime     int                   `json:"cooking_time"`
+	RestingTime     int                   `json:"resting_time"`
+	Ingredients     []IngredientOutput    `json:"ingredients"`
+	Steps           []StepOutput          `json:"steps"`
+	Pictures        []PictureOutput       `json:"pictures"`
+	SourceLocale    string                `json:"source_locale,omitempty"`
+	Locale          string                `json:"locale,omitempty"`
 	// VariationOf is the id of the recipe this one is a variation of, empty
 	// for a root recipe. VariationCount is how many variations a root has
 	// (always 0 for a variation - it describes the root's family size, not
@@ -218,9 +271,9 @@ func (s *Server) stepOutputs(steps []models.Step) []StepOutput {
 
 func (s *Server) recipeOutput(recipe models.Recipe) RecipeOutput {
 	output := RecipeOutput{
-		Title: recipe.Title, Description: recipe.Description, Quantity: recipe.Quantity, Kind: recipe.Kind,
+		Title: recipe.Title, Description: recipe.Description, Quantity: recipe.Quantity, Kind: recipe.Kind, Category: recipe.Category,
 		PreparationTime: recipe.PreparationTime, CookingTime: recipe.CookingTime, RestingTime: recipe.RestingTime,
-		Ingredients: recipe.Ingredients, Steps: s.stepOutputs(recipe.Steps), SourceLocale: recipe.SourceLocale, Locale: recipe.Locale,
+		Ingredients: ingredientOutputs(recipe.Ingredients), Steps: s.stepOutputs(recipe.Steps), SourceLocale: recipe.SourceLocale, Locale: recipe.Locale,
 		Pictures: []PictureOutput{}, VariationCount: recipe.VariationCount,
 	}
 	if recipe.Id != nil {
@@ -235,25 +288,6 @@ func (s *Server) recipeOutput(recipe models.Recipe) RecipeOutput {
 	return output
 }
 
-func (s *Server) previewOutput(recipe models.RecipePreview) RecipeOutput {
-	result := RecipeOutput{
-		Title: recipe.Title, Description: recipe.Description, Quantity: recipe.Quantity, Kind: recipe.Kind,
-		PreparationTime: recipe.PreparationTime, CookingTime: recipe.CookingTime, RestingTime: recipe.RestingTime,
-		SourceLocale: recipe.SourceLocale, Locale: recipe.Locale,
-		Pictures: []PictureOutput{}, VariationCount: recipe.VariationCount,
-	}
-	if recipe.Id != nil {
-		result.ID = recipe.Id.Hex()
-	}
-	if recipe.VariationOf != nil {
-		result.VariationOf = recipe.VariationOf.Hex()
-	}
-	for _, id := range recipe.Pictures {
-		result.Pictures = append(result.Pictures, PictureOutput{ID: id, URL: s.pictureBase + id})
-	}
-	return result
-}
-
 func (s *Server) list(ctx context.Context, req *mcp.CallToolRequest, input ListInput) (*mcp.CallToolResult, ListOutput, error) {
 	userID, err := userWithScope(req, "recipes:read")
 	if err != nil {
@@ -263,13 +297,13 @@ func (s *Server) list(ctx context.Context, req *mcp.CallToolRequest, input ListI
 	if err != nil {
 		return nil, ListOutput{}, err
 	}
-	items, total, next, err := s.recipes.ListForUser(ctx, userID, cursor, input.Limit, input.Locale)
+	items, total, next, err := s.recipes.ListDetailedForUser(ctx, userID, cursor, input.Limit, input.Locale)
 	if err != nil {
 		return nil, ListOutput{}, err
 	}
 	output := ListOutput{Total: total, NextCursor: encodeCursor(next)}
 	for _, item := range items {
-		output.Items = append(output.Items, s.previewOutput(item))
+		output.Items = append(output.Items, s.recipeOutput(item))
 	}
 	return nil, output, nil
 }
@@ -306,9 +340,9 @@ func (s *Server) create(ctx context.Context, req *mcp.CallToolRequest, input Cre
 		return nil, RecipeOutput{}, err
 	}
 	recipe, err := s.recipes.Create(ctx, userID, models.CreateRecipe{
-		Title: input.Title, Description: input.Description, Quantity: input.Quantity, Kind: input.Kind,
+		Title: input.Title, Description: input.Description, Quantity: input.Quantity, Kind: input.Kind, Category: input.Category,
 		PreparationTime: input.PreparationTime, CookingTime: input.CookingTime, RestingTime: input.RestingTime,
-		Ingredients: input.Ingredients, Steps: input.Steps, SourceLocale: input.Locale,
+		Ingredients: ingredientsFromInput(input.Ingredients), Steps: input.Steps, SourceLocale: input.Locale,
 	}, nil, nil)
 	if err != nil {
 		return nil, RecipeOutput{}, err
@@ -325,10 +359,15 @@ func (s *Server) update(ctx context.Context, req *mcp.CallToolRequest, input Upd
 	if err != nil {
 		return nil, RecipeOutput{}, err
 	}
+	var ingredients *[]models.Ingredient
+	if input.Ingredients != nil {
+		converted := ingredientsFromInput(*input.Ingredients)
+		ingredients = &converted
+	}
 	updated, err := s.recipes.Update(ctx, canonical, models.UpdateRecipeRequest{
-		Title: input.Title, Description: input.Description, Quantity: input.Quantity, Kind: input.Kind,
+		Title: input.Title, Description: input.Description, Quantity: input.Quantity, Kind: input.Kind, Category: input.Category,
 		PreparationTime: input.PreparationTime, CookingTime: input.CookingTime, RestingTime: input.RestingTime,
-		Ingredients: input.Ingredients, Steps: input.Steps, Locale: input.Locale, KeepPictureIDs: input.KeepPictureIDs,
+		Ingredients: ingredients, Steps: input.Steps, Locale: input.Locale, KeepPictureIDs: input.KeepPictureIDs,
 	}, nil, nil)
 	if err != nil {
 		return nil, RecipeOutput{}, err

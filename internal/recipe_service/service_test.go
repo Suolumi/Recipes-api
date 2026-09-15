@@ -40,12 +40,16 @@ type fakeStore struct {
 	repointVariationsFn         func(oldRootID, newRootID string) error
 	promoteRecipeToRootFn       func(id string) error
 	getVariationCountsFn        func(rootIDs []string) (map[string]int64, error)
+	repointRecipeReferencesFn   func(oldRootID, newRootID string) error
+	hasIncomingReferencesFn     func(recipeID string) (bool, error)
+	getRecipeTitlesFn           func(ids []string) (map[string]string, error)
 	// callOrder records, in order, the names of RepointVariations/
 	// PromoteRecipeToRoot/DeleteRecipeById calls - used to assert promotion
 	// happens strictly before the delete.
-	callOrder           []string
-	repointVariations   int
-	promoteRecipeToRoot int
+	callOrder               []string
+	repointVariations       int
+	promoteRecipeToRoot     int
+	repointRecipeReferences int
 }
 
 func (f *fakeStore) CreateRecipe(authorID string, infos *models.CreateRecipe) (models.Recipe, error) {
@@ -137,6 +141,20 @@ func (f *fakeStore) GetVariationCounts(_ context.Context, rootIDs []string) (map
 		return f.getVariationCountsFn(rootIDs)
 	}
 	return map[string]int64{}, nil
+}
+func (f *fakeStore) RepointRecipeReferences(_ context.Context, oldRootID, newRootID string) error {
+	f.repointRecipeReferences++
+	f.callOrder = append(f.callOrder, "RepointRecipeReferences")
+	if f.repointRecipeReferencesFn != nil {
+		return f.repointRecipeReferencesFn(oldRootID, newRootID)
+	}
+	return nil
+}
+func (f *fakeStore) HasIncomingReferences(_ context.Context, recipeID string) (bool, error) {
+	if f.hasIncomingReferencesFn != nil {
+		return f.hasIncomingReferencesFn(recipeID)
+	}
+	return false, nil
 }
 
 func (f *fakeStore) AddFavorite(context.Context, string, string) error       { return nil }
@@ -509,6 +527,47 @@ func TestValidateRecipeAllowsEmptyLabel(t *testing.T) {
 	}
 }
 
+func TestValidateRecipeNormalizesEmptyCategoryToFood(t *testing.T) {
+	recipe := validRecipeDB([]models.Ingredient{{Name: "Flour"}})
+	recipe.Category = ""
+
+	if err := validateRecipe(&recipe); err != nil {
+		t.Fatalf("validateRecipe: %v", err)
+	}
+	if recipe.Category != models.Food {
+		t.Fatalf("Category = %q, want %q", recipe.Category, models.Food)
+	}
+}
+
+func TestValidateRecipeRejectsUnknownCategory(t *testing.T) {
+	recipe := validRecipeDB([]models.Ingredient{{Name: "Flour"}})
+	recipe.Category = models.RecipeCategory("bogus")
+
+	if err := validateRecipe(&recipe); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("validateRecipe err = %v, want ErrInvalid", err)
+	}
+}
+
+func TestValidateRecipeRequiresKindForFoodCategory(t *testing.T) {
+	recipe := validRecipeDB([]models.Ingredient{{Name: "Flour"}})
+	recipe.Category = models.Food
+	recipe.Kind = models.RecipeKind("bogus")
+
+	if err := validateRecipe(&recipe); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("validateRecipe err = %v, want ErrInvalid", err)
+	}
+}
+
+func TestValidateRecipeSkipsKindForDiyCategory(t *testing.T) {
+	recipe := validRecipeDB([]models.Ingredient{{Name: "Baking soda"}})
+	recipe.Category = models.Diy
+	recipe.Kind = ""
+
+	if err := validateRecipe(&recipe); err != nil {
+		t.Fatalf("validateRecipe: %v", err)
+	}
+}
+
 // pictureUpload builds a small valid PNG upload for tests that exercise
 // normalization/writing.
 func pictureUpload(t *testing.T) PictureUpload {
@@ -856,16 +915,26 @@ func TestDeletePromotesOldestVariationBeforeDeletingRoot(t *testing.T) {
 			}
 			return nil
 		},
+		repointRecipeReferencesFn: func(oldRootID, newRootID string) error {
+			if oldRootID != rootID || newRootID != oldestVariation.Hex() {
+				t.Fatalf("RepointRecipeReferences(%q, %q), want (%q, %q)", oldRootID, newRootID, rootID, oldestVariation.Hex())
+			}
+			return nil
+		},
+		hasIncomingReferencesFn: func(string) (bool, error) {
+			t.Fatal("HasIncomingReferences should not be called when a variation is promoted in the root's place")
+			return false, nil
+		},
 	}
 	s := &Service{db: store}
 
 	if _, err := s.Delete(context.Background(), rootID); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	if store.repointVariations != 1 || store.promoteRecipeToRoot != 1 || store.deleteRecipeById != 1 {
-		t.Fatalf("call counts = repoint:%d promote:%d delete:%d, want 1/1/1", store.repointVariations, store.promoteRecipeToRoot, store.deleteRecipeById)
+	if store.repointVariations != 1 || store.promoteRecipeToRoot != 1 || store.repointRecipeReferences != 1 || store.deleteRecipeById != 1 {
+		t.Fatalf("call counts = repoint:%d promote:%d repointRefs:%d delete:%d, want 1/1/1/1", store.repointVariations, store.promoteRecipeToRoot, store.repointRecipeReferences, store.deleteRecipeById)
 	}
-	want := []string{"RepointVariations", "PromoteRecipeToRoot", "DeleteRecipeById"}
+	want := []string{"RepointVariations", "PromoteRecipeToRoot", "RepointRecipeReferences", "DeleteRecipeById"}
 	if len(store.callOrder) != len(want) {
 		t.Fatalf("callOrder = %v, want %v", store.callOrder, want)
 	}
@@ -894,6 +963,47 @@ func TestDeleteStillBlockedByFavoritesEvenWithVariations(t *testing.T) {
 	}
 	if store.repointVariations != 0 || store.promoteRecipeToRoot != 0 {
 		t.Fatalf("promotion calls = repoint:%d promote:%d, want 0/0", store.repointVariations, store.promoteRecipeToRoot)
+	}
+}
+
+func TestDeleteBlockedWhenReferencedWithNoVariationToPromote(t *testing.T) {
+	id := primitive.NewObjectID().Hex()
+	store := &fakeStore{
+		getFavoriteInfoFn: func(ids []string, userID string) (map[string]models.FavoriteInfo, error) {
+			return map[string]models.FavoriteInfo{}, nil
+		},
+		hasIncomingReferencesFn: func(gotID string) (bool, error) {
+			if gotID != id {
+				t.Fatalf("HasIncomingReferences called with %q, want %q", gotID, id)
+			}
+			return true, nil
+		},
+	}
+	s := &Service{db: store}
+
+	if _, err := s.Delete(context.Background(), id); !errors.Is(err, ErrRecipeReferenced) {
+		t.Fatalf("Delete err = %v, want ErrRecipeReferenced", err)
+	}
+	if store.deleteRecipeById != 0 {
+		t.Fatalf("DeleteRecipeById called %d times, want 0", store.deleteRecipeById)
+	}
+}
+
+func TestDeleteAllowedWhenNotReferenced(t *testing.T) {
+	id := primitive.NewObjectID().Hex()
+	store := &fakeStore{
+		getFavoriteInfoFn: func(ids []string, userID string) (map[string]models.FavoriteInfo, error) {
+			return map[string]models.FavoriteInfo{}, nil
+		},
+		hasIncomingReferencesFn: func(string) (bool, error) { return false, nil },
+	}
+	s := &Service{db: store}
+
+	if _, err := s.Delete(context.Background(), id); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if store.deleteRecipeById != 1 {
+		t.Fatalf("DeleteRecipeById called %d times, want 1", store.deleteRecipeById)
 	}
 }
 

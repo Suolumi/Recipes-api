@@ -53,14 +53,14 @@ Token validation is stateless apart from checking that the user still exists and
 
 - `list_my_recipes`: accepts optional `cursor`, `limit` (default 20, maximum 100), and one BCP 47 `locale`. It returns the total, items, and an opaque next cursor.
 - `get_my_recipe`: accepts `recipe_id` and optional `locale`. Pictures contain both their stored ID and public URL, and are also returned as MCP resource links. Each step's `picture`, if any, is a full URL too (resolved server-side, unlike the REST/website representation where a step's `picture` is a bare filename).
-- `create_recipe`: requires a complete recipe. Pictures cannot be uploaded through this tool, at the recipe level or per step; attach them via the website. Any `picture` sent on a step is ignored.
+- `create_recipe`: requires a complete recipe. `category` (`food` or `diy`) is optional and defaults to `food`; `kind` is required for `food` and ignored for `diy`. Pictures cannot be uploaded through this tool, at the recipe level or per step; attach them via the website. Any `picture` sent on a step is ignored.
 - `update_recipe`: requires `recipe_id`; all other recipe fields are true patch fields. Optional `keep_picture_ids` gives the ordered existing pictures to retain, or removes them all with an empty list. New pictures cannot be uploaded through this tool, at the recipe level or per step; attach them via the website. A step's `picture` may only be left empty or set to a filename that already belongs to one of the recipe's existing steps (i.e. keep or reassign an existing step picture) — any other value is rejected.
 
 There is intentionally no MCP delete tool. Recipe deletion remains available through the website/REST API.
 
 MCP tool calls carry structured JSON, which makes uploading binary picture data through them impractical (it has to be inlined as base64), so picture attachment is REST/website-only — see below.
 
-Recipes must have a nonblank title, quantity of at least one, a supported kind, nonnegative times, at least one named ingredient, and at least one step with a description. Incomplete recipes are rejected rather than saved as drafts.
+Recipes must have a nonblank title, quantity of at least one, nonnegative times, at least one named ingredient, and at least one step with a description. `category` is one of `food` (default) or `diy`; a supported `kind` is required only when `category` is `food` and is ignored otherwise. Incomplete recipes are rejected rather than saved as drafts.
 
 ## Localization
 

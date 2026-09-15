@@ -15,22 +15,23 @@ import (
 const translationsCollection = "recipe_translations"
 
 type recipeTranslationDocument struct {
-	ID              primitive.ObjectID  `bson:"_id,omitempty"`
-	RecipeID        primitive.ObjectID  `bson:"recipe_id"`
-	Author          *primitive.ObjectID `bson:"author,omitempty"`
-	Title           string              `bson:"title,omitempty"`
-	Description     string              `bson:"description,omitempty"`
-	Quantity        int                 `bson:"quantity,omitempty"`
-	Kind            models.RecipeKind   `bson:"kind,omitempty"`
-	PreparationTime int                 `bson:"preparation_time,omitempty"`
-	CookingTime     int                 `bson:"cooking_time,omitempty"`
-	RestingTime     int                 `bson:"resting_time,omitempty"`
-	Ingredients     []models.Ingredient `bson:"ingredients,omitempty"`
-	Steps           []models.Step       `bson:"steps,omitempty"`
-	Pictures        []string            `bson:"pictures,omitempty"`
-	SourceLocale    string              `bson:"source_locale,omitempty"`
-	Locale          string              `bson:"locale,omitempty"`
-	SourceHash      string              `bson:"source_hash,omitempty"`
+	ID              primitive.ObjectID    `bson:"_id,omitempty"`
+	RecipeID        primitive.ObjectID    `bson:"recipe_id"`
+	Author          *primitive.ObjectID   `bson:"author,omitempty"`
+	Title           string                `bson:"title,omitempty"`
+	Description     string                `bson:"description,omitempty"`
+	Quantity        int                   `bson:"quantity,omitempty"`
+	Kind            models.RecipeKind     `bson:"kind,omitempty"`
+	Category        models.RecipeCategory `bson:"category,omitempty"`
+	PreparationTime int                   `bson:"preparation_time,omitempty"`
+	CookingTime     int                   `bson:"cooking_time,omitempty"`
+	RestingTime     int                   `bson:"resting_time,omitempty"`
+	Ingredients     []models.Ingredient   `bson:"ingredients,omitempty"`
+	Steps           []models.Step         `bson:"steps,omitempty"`
+	Pictures        []string              `bson:"pictures,omitempty"`
+	SourceLocale    string                `bson:"source_locale,omitempty"`
+	Locale          string                `bson:"locale,omitempty"`
+	SourceHash      string                `bson:"source_hash,omitempty"`
 }
 
 func translationFromRecipe(recipe models.Recipe, locale string) (recipeTranslationDocument, error) {
@@ -52,6 +53,7 @@ func translationFromRecipe(recipe models.Recipe, locale string) (recipeTranslati
 		Description:     recipe.Description,
 		Quantity:        recipe.Quantity,
 		Kind:            recipe.Kind,
+		Category:        recipe.Category,
 		PreparationTime: recipe.PreparationTime,
 		CookingTime:     recipe.CookingTime,
 		RestingTime:     recipe.RestingTime,

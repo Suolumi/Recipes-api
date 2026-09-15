@@ -232,6 +232,15 @@ func buildRecipeFilterPipeline(parameters models.GetRecipesRequest) []bson.D {
 
 	pipeline = append(pipeline, recipeAuthorPipeline...)
 
+	if parameters.ExcludeFamily != "" {
+		// Used by the "add recipe as ingredient" picker so a recipe can't
+		// offer itself as a reference target. UX nicety only; the
+		// authoritative enforcement is recipe_service.validateIngredientRefs.
+		if excludeID, err := primitive.ObjectIDFromHex(parameters.ExcludeFamily); err == nil {
+			pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.D{{Key: "_id", Value: bson.D{{Key: "$ne", Value: excludeID}}}}}})
+		}
+	}
+
 	switch {
 	case parameters.VariationOf != "":
 		// List only the variations of the given recipe id, never the root.
@@ -245,6 +254,15 @@ func buildRecipeFilterPipeline(parameters models.GetRecipesRequest) []bson.D {
 		// Default public discovery listing: collapse each family to its
 		// root.
 		pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.D{{Key: "variation_of", Value: bson.D{{Key: "$exists", Value: false}}}}}})
+		if parameters.Category == models.Diy {
+			pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.D{{Key: "category", Value: models.Diy}}}})
+		} else {
+			// Empty or "food": exclude diy, but include both explicit "food"
+			// docs and legacy docs with no category field at all (predate
+			// this field) - NOT a plain equality match, see
+			// GetRecipesRequest.Category's doc comment.
+			pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.D{{Key: "category", Value: bson.D{{Key: "$ne", Value: models.Diy}}}}}})
+		}
 	}
 
 	// A title/ingredient search on the default discovery listing also
@@ -692,6 +710,86 @@ func (c *Client) GetVariationCounts(ctx context.Context, rootIDs []string) (map[
 	}
 	for _, doc := range docs {
 		result[doc.ID.Hex()] = doc.Count
+	}
+	return result, nil
+}
+
+// RepointRecipeReferences updates every ingredients[].recipe_ref equal to
+// oldRootID (across all recipes) to point at newRootID instead - the
+// cross-recipe-reference analogue of RepointVariations, needing a filtered
+// positional array update since recipe_ref lives inside an ingredients
+// array, not a top-level scalar.
+func (c *Client) RepointRecipeReferences(ctx context.Context, oldRootID, newRootID string) error {
+	oldRootObjectID, err := primitive.ObjectIDFromHex(oldRootID)
+	if err != nil {
+		return err
+	}
+	newRootObjectID, err := primitive.ObjectIDFromHex(newRootID)
+	if err != nil {
+		return err
+	}
+	_, err = c.db.Collection(recipesCollection).UpdateMany(ctx,
+		bson.M{"ingredients.recipe_ref": oldRootObjectID},
+		bson.M{"$set": bson.M{"ingredients.$[elem].recipe_ref": newRootObjectID}},
+		options.Update().SetArrayFilters(options.ArrayFilters{
+			Filters: bson.A{bson.M{"elem.recipe_ref": oldRootObjectID}},
+		}),
+	)
+	return err
+}
+
+// HasIncomingReferences reports whether any recipe's ingredients reference
+// recipeID - the existence-only counterpart of the reverse
+// Ingredient.RecipeRef edge, powering Delete's block-check. Uses the same
+// sparse ingredients.recipe_ref index as RepointRecipeReferences.
+func (c *Client) HasIncomingReferences(ctx context.Context, recipeID string) (bool, error) {
+	objectID, err := primitive.ObjectIDFromHex(recipeID)
+	if err != nil {
+		return false, err
+	}
+	count, err := c.db.Collection(recipesCollection).CountDocuments(ctx,
+		bson.M{"ingredients.recipe_ref": objectID},
+		options.Count().SetLimit(1),
+	)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// GetRecipeTitles returns each id's current title, for cheaply resolving a
+// reference ingredient's display title in bulk (one query regardless of how
+// many recipes/ingredients reference the same or different targets). An id
+// with no matching document (a dangling reference - shouldn't happen given
+// write-time validation, tolerated defensively) is simply absent from the
+// result.
+func (c *Client) GetRecipeTitles(ctx context.Context, ids []string) (map[string]string, error) {
+	result := make(map[string]string, len(ids))
+	objectIDs := make([]primitive.ObjectID, 0, len(ids))
+	for _, id := range ids {
+		if objectID, err := primitive.ObjectIDFromHex(id); err == nil {
+			objectIDs = append(objectIDs, objectID)
+		}
+	}
+	if len(objectIDs) == 0 {
+		return result, nil
+	}
+	cursor, err := c.db.Collection(recipesCollection).Find(ctx,
+		bson.M{"_id": bson.M{"$in": objectIDs}},
+		options.Find().SetProjection(bson.M{"title": 1}),
+	)
+	if err != nil {
+		return nil, err
+	}
+	var docs []struct {
+		ID    primitive.ObjectID `bson:"_id"`
+		Title string             `bson:"title"`
+	}
+	if err := cursor.All(ctx, &docs); err != nil {
+		return nil, err
+	}
+	for _, doc := range docs {
+		result[doc.ID.Hex()] = doc.Title
 	}
 	return result, nil
 }

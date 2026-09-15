@@ -8,7 +8,48 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+
+	"recipes/internal/models"
 )
+
+func TestIngredientOutputsResolvesRecipeRef(t *testing.T) {
+	ref := primitive.NewObjectID()
+	ingredients := []models.Ingredient{
+		{Name: "Flour", Quantity: 250, Unit: "g"},
+		{Quantity: 1, Unit: "batch", RecipeRef: &ref, ResolvedRefTitle: "Tarte Dough"},
+	}
+
+	outputs := ingredientOutputs(ingredients)
+	if len(outputs) != 2 {
+		t.Fatalf("len(outputs) = %d, want 2", len(outputs))
+	}
+	if outputs[0].RecipeRef != nil {
+		t.Fatalf("outputs[0].RecipeRef = %+v, want nil for a free-text ingredient", outputs[0].RecipeRef)
+	}
+	if outputs[1].RecipeRef == nil {
+		t.Fatal("outputs[1].RecipeRef = nil, want resolved")
+	}
+	if outputs[1].RecipeRef.ID != ref.Hex() || outputs[1].RecipeRef.Title != "Tarte Dough" {
+		t.Fatalf("outputs[1].RecipeRef = %+v, want {ID: %q, Title: %q}", outputs[1].RecipeRef, ref.Hex(), "Tarte Dough")
+	}
+	if outputs[1].Quantity != 1 || outputs[1].Unit != "batch" {
+		t.Fatalf("outputs[1] quantity/unit = %v/%q, want 1/batch", outputs[1].Quantity, outputs[1].Unit)
+	}
+}
+
+func TestIngredientsFromInputHasNoRecipeRefField(t *testing.T) {
+	// IngredientInput structurally has no recipe_ref field, so this is really
+	// a compile-time guarantee - this test just documents/locks the
+	// conversion's behavior for a plain ingredient.
+	inputs := []IngredientInput{{Name: "Sugar", Quantity: 2, Unit: "tbsp", Label: "For the glaze"}}
+	got := ingredientsFromInput(inputs)
+	if len(got) != 1 || got[0].RecipeRef != nil {
+		t.Fatalf("ingredientsFromInput(%+v) = %+v, want one ingredient with RecipeRef nil", inputs, got)
+	}
+	if got[0].Name != "Sugar" || got[0].Quantity != 2 || got[0].Unit != "tbsp" || got[0].Label != "For the glaze" {
+		t.Fatalf("ingredientsFromInput mapped fields incorrectly: %+v", got[0])
+	}
+}
 
 func TestCursorRoundTrip(t *testing.T) {
 	id := primitive.NewObjectID().Hex()

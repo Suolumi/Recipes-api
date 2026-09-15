@@ -37,9 +37,10 @@ const (
 var translateBackoffs = []time.Duration{time.Second, 4 * time.Second, 10 * time.Second}
 
 var (
-	ErrInvalid      = errors.New("invalid recipe")
-	ErrNotFound     = errors.New("recipe not found")
-	ErrHasFavorites = errors.New("recipe has favorites")
+	ErrInvalid          = errors.New("invalid recipe")
+	ErrNotFound         = errors.New("recipe not found")
+	ErrHasFavorites     = errors.New("recipe has favorites")
+	ErrRecipeReferenced = errors.New("recipe is referenced by other recipes")
 )
 
 type PictureUpload struct {
@@ -67,6 +68,8 @@ type Store interface {
 	RepointVariations(ctx context.Context, oldRootID, newRootID string) error
 	PromoteRecipeToRoot(ctx context.Context, id string) error
 	GetVariationCounts(ctx context.Context, rootIDs []string) (map[string]int64, error)
+	RepointRecipeReferences(ctx context.Context, oldRootID, newRootID string) error
+	HasIncomingReferences(ctx context.Context, recipeID string) (bool, error)
 
 	AddFavorite(ctx context.Context, userID, recipeID string) error
 	RemoveFavorite(ctx context.Context, userID, recipeID string) error
@@ -131,7 +134,13 @@ func validateRecipe(recipe *models.RecipeDB) error {
 	if recipe.Quantity < 1 {
 		return fmt.Errorf("%w: quantity must be at least 1", ErrInvalid)
 	}
-	if !slices.Contains(models.RecipeKinds, recipe.Kind) {
+	if recipe.Category == "" {
+		recipe.Category = models.Food
+	}
+	if !slices.Contains(models.RecipeCategories, recipe.Category) {
+		return fmt.Errorf("%w: invalid recipe category", ErrInvalid)
+	}
+	if recipe.Category != models.Diy && !slices.Contains(models.RecipeKinds, recipe.Kind) {
 		return fmt.Errorf("%w: invalid recipe kind", ErrInvalid)
 	}
 	if recipe.PreparationTime < 0 || recipe.CookingTime < 0 || recipe.RestingTime < 0 {
@@ -299,7 +308,7 @@ func (s *Service) Create(ctx context.Context, authorID string, input models.Crea
 		input.Steps[i].Picture = ""
 	}
 	recipeDB := models.RecipeDB{
-		Title: input.Title, Description: input.Description, Quantity: input.Quantity, Kind: input.Kind,
+		Title: input.Title, Description: input.Description, Quantity: input.Quantity, Kind: input.Kind, Category: input.Category,
 		PreparationTime: input.PreparationTime, CookingTime: input.CookingTime, RestingTime: input.RestingTime,
 		Ingredients: input.Ingredients, Steps: input.Steps, SourceLocale: input.SourceLocale,
 	}
@@ -379,6 +388,9 @@ func mergePatch(recipe models.Recipe, patch models.UpdateRecipeRequest, freshSte
 	}
 	if patch.Kind != nil {
 		merged.Kind = *patch.Kind
+	}
+	if patch.Category != nil {
+		merged.Category = *patch.Category
 	}
 	if patch.PreparationTime != nil {
 		merged.PreparationTime = *patch.PreparationTime
@@ -709,6 +721,30 @@ func (s *Service) decorateVariationCountsPreviews(ctx context.Context, previews 
 	}
 }
 
+// decorateVariationCounts is decorateVariationCountsPreviews for a page of
+// full recipes rather than previews.
+func (s *Service) decorateVariationCounts(ctx context.Context, recipes []models.Recipe) {
+	ids := make([]string, 0, len(recipes))
+	for _, recipe := range recipes {
+		if recipe.Id != nil && recipe.VariationOf == nil {
+			ids = append(ids, recipe.Id.Hex())
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	counts, err := s.db.GetVariationCounts(ctx, ids)
+	if err != nil {
+		utils.LogError("could not load variation counts", err)
+		return
+	}
+	for i := range recipes {
+		if recipes[i].Id != nil && recipes[i].VariationOf == nil {
+			recipes[i].VariationCount = counts[recipes[i].Id.Hex()]
+		}
+	}
+}
+
 func sameBaseLocale(left, right string) bool {
 	if left == "" || right == "" {
 		return false
@@ -826,7 +862,40 @@ func (s *Service) ListForUser(ctx context.Context, userID, cursor string, limit 
 	return previews, count, next, nil
 }
 
-func (s *Service) localizePreviews(ctx context.Context, documents []models.Recipe, requested string) []models.RecipePreview {
+// ListDetailedForUser is ListForUser but returns full recipes (ingredients,
+// steps, ...) instead of previews. MCP's list_my_recipes renders each item
+// through the same recipeOutput() get_my_recipe uses - including resolving
+// recipe_ref ingredients - which needs the full document, not the preview
+// projection.
+func (s *Service) ListDetailedForUser(ctx context.Context, userID, cursor string, limit int, locale string) ([]models.Recipe, int64, string, error) {
+	locale, err := normalizeLocale(locale)
+	if err != nil {
+		return nil, 0, "", err
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	documents, count, err := s.db.GetRecipesByAuthor(ctx, userID, cursor, limit+1)
+	if err != nil {
+		return nil, 0, "", err
+	}
+	next := ""
+	if len(documents) > limit {
+		next = documents[limit-1].Id.Hex()
+		documents = documents[:limit]
+	}
+	recipes := s.localizeBatch(ctx, documents, locale)
+	s.decorateVariationCounts(ctx, recipes)
+	return recipes, count, next, nil
+}
+
+// localizeBatch resolves each document's best-matching translation (or
+// falls back to canonical) in one batched translations lookup - the shared
+// core of localizePreviews and ListDetailedForUser.
+func (s *Service) localizeBatch(ctx context.Context, documents []models.Recipe, requested string) []models.Recipe {
 	requested, err := normalizeLocale(requested)
 	translations := map[string]models.Recipe{}
 	if err == nil && requested != "" {
@@ -842,7 +911,7 @@ func (s *Service) localizePreviews(ctx context.Context, documents []models.Recip
 			}
 		}
 	}
-	previews := make([]models.RecipePreview, 0, len(documents))
+	localized := make([]models.Recipe, 0, len(documents))
 	for _, document := range documents {
 		recipe := document
 		recipe.Locale = document.SourceLocale
@@ -850,10 +919,19 @@ func (s *Service) localizePreviews(ctx context.Context, documents []models.Recip
 			translation, found := translations[document.Id.Hex()]
 			recipe = pickTranslation(document, translation, requested, found)
 		}
+		localized = append(localized, recipe)
+	}
+	return localized
+}
+
+func (s *Service) localizePreviews(ctx context.Context, documents []models.Recipe, requested string) []models.RecipePreview {
+	localized := s.localizeBatch(ctx, documents, requested)
+	previews := make([]models.RecipePreview, 0, len(localized))
+	for _, recipe := range localized {
 		previews = append(previews, models.RecipePreview{
 			Id: recipe.Id, Title: recipe.Title, Description: recipe.Description, Author: recipe.Author,
 			PreparationTime: recipe.PreparationTime, CookingTime: recipe.CookingTime, RestingTime: recipe.RestingTime,
-			Kind: recipe.Kind, Quantity: recipe.Quantity, Pictures: recipe.Pictures,
+			Kind: recipe.Kind, Category: recipe.Category, Quantity: recipe.Quantity, Pictures: recipe.Pictures,
 			SourceLocale: recipe.SourceLocale, Locale: recipe.Locale, VariationOf: recipe.VariationOf,
 		})
 	}
@@ -888,6 +966,19 @@ func (s *Service) Delete(ctx context.Context, recipeID string) (models.RecipeDB,
 		}
 		if err := s.db.PromoteRecipeToRoot(ctx, oldestID.Hex()); err != nil {
 			return models.RecipeDB{}, err
+		}
+		if err := s.db.RepointRecipeReferences(ctx, recipeID, oldestID.Hex()); err != nil {
+			return models.RecipeDB{}, err
+		}
+	} else {
+		// No variation to promote in recipeID's place, so any incoming
+		// reference would be orphaned by deleting it - block instead.
+		referenced, err := s.db.HasIncomingReferences(ctx, recipeID)
+		if err != nil {
+			return models.RecipeDB{}, err
+		}
+		if referenced {
+			return models.RecipeDB{}, ErrRecipeReferenced
 		}
 	}
 	deleted, err := s.db.DeleteRecipeById(recipeID)

@@ -101,6 +101,7 @@ func (t *Translator) TranslateRecipe(recipe models.Recipe, to string) (models.Re
 		Description:     translations[1].Text,
 		Quantity:        recipe.Quantity,
 		Kind:            recipe.Kind,
+		Category:        recipe.Category,
 		PreparationTime: recipe.PreparationTime,
 		CookingTime:     recipe.CookingTime,
 		RestingTime:     recipe.RestingTime,

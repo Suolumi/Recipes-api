@@ -2,9 +2,10 @@ package database
 
 import (
 	"context"
+	"recipes/internal/models"
+
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	mongodriver "go.mongodb.org/mongo-driver/mongo"
-	"recipes/internal/models"
 )
 
 type Database interface {
@@ -39,6 +40,9 @@ type Database interface {
 	RepointVariations(ctx context.Context, oldRootID, newRootID string) error
 	PromoteRecipeToRoot(ctx context.Context, id string) error
 	GetVariationCounts(ctx context.Context, rootIDs []string) (map[string]int64, error)
+	RepointRecipeReferences(ctx context.Context, oldRootID, newRootID string) error
+	HasIncomingReferences(ctx context.Context, recipeID string) (bool, error)
+	GetRecipeTitles(ctx context.Context, ids []string) (map[string]string, error)
 
 	AddFavorite(ctx context.Context, userID, recipeID string) error
 	RemoveFavorite(ctx context.Context, userID, recipeID string) error

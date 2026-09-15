@@ -61,6 +61,54 @@ func TestGetRecipeDocumentsVariationFiltering(t *testing.T) {
 	assert.ElementsMatch(t, []string{root.Hex(), variation.Hex()}, gotIDs)
 }
 
+func TestGetRecipeDocumentsCategoryFiltering(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	author := insertTestUser(t, db, ctx, "category-author")
+	food := insertRecipeDoc(t, db, ctx, bson.M{
+		"author": author, "title": "Cinnamon Rolls",
+		"ingredients": bson.A{bson.M{"name": "flour"}}, "kind": "dish", "category": "food",
+	})
+	diy := insertRecipeDoc(t, db, ctx, bson.M{
+		"author": author, "title": "Lavender Soap",
+		"ingredients": bson.A{bson.M{"name": "lye"}}, "category": "diy",
+	})
+	// A legacy document predating this field, with no category set at all -
+	// must still show up on the default/food listing (see
+	// GetRecipesRequest.Category's doc comment).
+	legacy := insertRecipeDoc(t, db, ctx, bson.M{
+		"author": author, "title": "Legacy Stew",
+		"ingredients": bson.A{bson.M{"name": "carrot"}}, "kind": "dish",
+	})
+
+	// Default listing (no Category set) excludes diy but includes both
+	// explicit food docs and legacy untagged docs.
+	defaultList, _, err := db.GetRecipeDocuments(models.GetRecipesRequest{Limit: 10})
+	require.NoError(t, err)
+	gotIDs := make([]string, len(defaultList))
+	for i, r := range defaultList {
+		gotIDs[i] = r.Id.Hex()
+	}
+	assert.ElementsMatch(t, []string{food.Hex(), legacy.Hex()}, gotIDs)
+
+	// category=diy lists only the diy recipe.
+	diyList, _, err := db.GetRecipeDocuments(models.GetRecipesRequest{Limit: 10, Category: models.Diy})
+	require.NoError(t, err)
+	require.Len(t, diyList, 1)
+	assert.Equal(t, diy.Hex(), diyList[0].Id.Hex())
+
+	// OwnRecipes stays category-agnostic - it returns every recipe by the
+	// author regardless of category.
+	ownRecipes, _, err := db.GetRecipeDocuments(models.GetRecipesRequest{Limit: 10, OwnRecipes: true, Author: "category-author"})
+	require.NoError(t, err)
+	ownIDs := make([]string, len(ownRecipes))
+	for i, r := range ownRecipes {
+		ownIDs[i] = r.Id.Hex()
+	}
+	assert.ElementsMatch(t, []string{food.Hex(), diy.Hex(), legacy.Hex()}, ownIDs)
+}
+
 func TestGetRecipeDocumentsSearchSurfacesRootViaVariation(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
