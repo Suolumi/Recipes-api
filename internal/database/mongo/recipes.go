@@ -714,6 +714,34 @@ func (c *Client) GetVariationCounts(ctx context.Context, rootIDs []string) (map[
 	return result, nil
 }
 
+// RecipeCountsByCategory returns the number of recipes per category, keyed by
+// category string ("food"/"diy"). Legacy documents with no category field
+// (predating GetRecipesRequest.Category, see buildRecipeFilterPipeline) count
+// as "food", matching how the default listing already treats them.
+func (c *Client) RecipeCountsByCategory(ctx context.Context) (map[string]int64, error) {
+	cursor, err := c.db.Collection(recipesCollection).Aggregate(ctx, bson.A{
+		bson.D{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: bson.D{{Key: "$ifNull", Value: bson.A{"$category", string(models.Food)}}}},
+			{Key: "count", Value: bson.D{{Key: "$sum", Value: 1}}},
+		}}},
+	})
+	if err != nil {
+		return nil, err
+	}
+	var docs []struct {
+		ID    string `bson:"_id"`
+		Count int64  `bson:"count"`
+	}
+	if err := cursor.All(ctx, &docs); err != nil {
+		return nil, err
+	}
+	result := make(map[string]int64, len(docs))
+	for _, doc := range docs {
+		result[doc.ID] = doc.Count
+	}
+	return result, nil
+}
+
 // RepointRecipeReferences updates every ingredients[].recipe_ref equal to
 // oldRootID (across all recipes) to point at newRootID instead - the
 // cross-recipe-reference analogue of RepointVariations, needing a filtered

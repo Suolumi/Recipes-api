@@ -237,3 +237,26 @@ func TestVariationCountsAndPromotion(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), countsForOldest[oldest.Hex()])
 }
+
+// TestGetRecipeDocumentsOwnRecipesFlatAcrossAllUsers backs the admin
+// back-office's moderation browse view (handlers.AdminListRecipes): OwnRecipes
+// with no Author filter must return every recipe and variation from every
+// user, flat and ungrouped - never collapsed to family roots the way the
+// default public listing is.
+func TestGetRecipeDocumentsOwnRecipesFlatAcrossAllUsers(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	authorA := insertTestUser(t, db, ctx, "admin-browse-author-a")
+	authorB := insertTestUser(t, db, ctx, "admin-browse-author-b")
+	rootA := insertRecipeDoc(t, db, ctx, bson.M{"author": authorA, "title": "A Root", "ingredients": bson.A{bson.M{"name": "flour"}}, "kind": "dish"})
+	variationA := insertRecipeDoc(t, db, ctx, bson.M{"author": authorA, "title": "A Variation", "variation_of": rootA, "ingredients": bson.A{bson.M{"name": "flour"}}, "kind": "dish"})
+	rootB := insertRecipeDoc(t, db, ctx, bson.M{"author": authorB, "title": "B Root", "ingredients": bson.A{bson.M{"name": "flour"}}, "kind": "dish"})
+
+	all, count, err := db.GetRecipeDocuments(models.GetRecipesRequest{Limit: 10, OwnRecipes: true})
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), count)
+	require.Len(t, all, 3)
+	gotIDs := []string{all[0].Id.Hex(), all[1].Id.Hex(), all[2].Id.Hex()}
+	assert.ElementsMatch(t, []string{rootA.Hex(), variationA.Hex(), rootB.Hex()}, gotIDs)
+}

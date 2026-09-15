@@ -33,6 +33,7 @@ type Handlers struct {
 	e       *echo.Echo
 	jm      *jwt_manager.JwtManager
 	cfg     *config.RuntimeConfig
+	dbCfg   *config.DatabaseConfig
 	ms      *mail_sender.MailSender
 	recipes *recipe_service.Service
 	mcpAuth *mcp_server.Authenticator
@@ -114,6 +115,7 @@ func New(cfg *config.Config) (*Handlers, error) {
 		e:       e,
 		jm:      jm,
 		cfg:     cfg.Cfg,
+		dbCfg:   cfg.Db,
 		ms:      mail_sender.New(cfg.Mails),
 		recipes: recipeService,
 		mcpAuth: mcpAuth,
@@ -207,6 +209,17 @@ func (h *Handlers) RegisterEndpoints() {
 	protectedRouter.POST("/users/:id/picture", h.UpdateUserPicture, adminMiddleware, middleware.BodyLimit("10M"))
 	protectedRouter.DELETE("/users/:id/picture", h.DeleteUserPicture, adminMiddleware)
 
+	// Admin back-office routes
+	adminRouter := protectedRouter.Group("/admin", adminMiddleware)
+	adminRouter.GET("/routes", h.AdminRoutesManifest)
+	adminRouter.GET("/users", h.AdminListUsers)
+	adminRouter.PATCH("/users/:id/admin-status", h.SetUserAdminStatus, authLimiter)
+	adminRouter.POST("/users/:id/send-password-reset", h.AdminSendPasswordReset, authLimiter)
+	adminRouter.DELETE("/users/:id/mcp-token", h.AdminRevokeMcpToken, authLimiter)
+	adminRouter.GET("/recipes", h.AdminListRecipes)
+	adminRouter.GET("/system/stats", h.AdminStats)
+	adminRouter.POST("/system/cleanup-images", h.AdminCleanupImages, authLimiter)
+
 	// Recipes routes
 	unprotectedRouter.GET("/recipes", h.GetRecipes)
 	protectedRouter.POST("/recipes", h.CreateRecipe, middleware.BodyLimit("90M"))
@@ -221,21 +234,37 @@ func (h *Handlers) RegisterEndpoints() {
 	unprotectedRouter.Static("/recipe-pictures", h.cfg.RecipeImageDir)
 }
 
+// cleanupImages removes unreferenced picture files older than 24h from both
+// image directories, returning how many were removed from each (keyed by
+// directory). Shared by the startup background sweep and the on-demand admin
+// route.
+func (h *Handlers) cleanupImages(ctx context.Context) (map[string]int, error) {
+	references, err := h.db.ReferencedPictures(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("could not collect image references: %w", err)
+	}
+	removed := make(map[string]int, 2)
+	dirs := map[string]string{"pictures": h.cfg.ImagesDir, "recipe_pictures": h.cfg.RecipeImageDir}
+	for label, directory := range dirs {
+		count, err := images_manager.CleanupUnreferenced(directory, references, time.Now(), 24*time.Hour)
+		if err != nil {
+			return removed, fmt.Errorf("could not clean image directory %s: %w", directory, err)
+		}
+		removed[label] = count
+	}
+	return removed, nil
+}
+
 func (h *Handlers) StartBackgroundMaintenance(ctx context.Context) {
 	go func() {
-		references, err := h.db.ReferencedPictures(ctx)
+		removed, err := h.cleanupImages(ctx)
 		if err != nil {
-			utils.LogError("could not collect image references", err)
+			utils.LogError("could not clean image directories", err)
 			return
 		}
-		for _, directory := range []string{h.cfg.ImagesDir, h.cfg.RecipeImageDir} {
-			removed, err := images_manager.CleanupUnreferenced(directory, references, time.Now(), 24*time.Hour)
-			if err != nil {
-				utils.LogError("could not clean image directory", err, "directory", directory)
-				continue
-			}
-			if removed > 0 {
-				log.Printf("removed %d unreferenced images from %s", removed, directory)
+		for directory, count := range removed {
+			if count > 0 {
+				log.Printf("removed %d unreferenced images from %s", count, directory)
 			}
 		}
 	}()

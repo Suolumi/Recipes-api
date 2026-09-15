@@ -170,6 +170,14 @@ func (c *Client) GetUsers(username string, limit, offset int) ([]models.UserDB, 
 	return users, number, nil
 }
 
+func (c *Client) CountUsers(ctx context.Context) (int64, error) {
+	return c.db.Collection(userCollection).CountDocuments(ctx, bson.M{})
+}
+
+func (c *Client) CountAdmins(ctx context.Context) (int64, error) {
+	return c.db.Collection(userCollection).CountDocuments(ctx, bson.M{"admin": true})
+}
+
 func (c *Client) CreateUser(user models.UserDB) (models.UserDB, error) {
 	hashedPassword, err := utils.HashPassword(user.Password)
 	if err != nil {

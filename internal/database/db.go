@@ -20,6 +20,8 @@ type Database interface {
 	DeleteUserById(id string) (models.UserDB, error)
 	UserConflicts(user models.UserDB) (models.UserDB, error)
 	BumpMCPAuthVersion(ctx context.Context, id string) error
+	CountUsers(ctx context.Context) (int64, error)
+	CountAdmins(ctx context.Context) (int64, error)
 
 	CreateRecipe(authorId string, infos *models.CreateRecipe) (models.Recipe, error)
 	AddLocaleRecipe(recipe models.Recipe, locale string) (models.Recipe, error)
@@ -40,6 +42,7 @@ type Database interface {
 	RepointVariations(ctx context.Context, oldRootID, newRootID string) error
 	PromoteRecipeToRoot(ctx context.Context, id string) error
 	GetVariationCounts(ctx context.Context, rootIDs []string) (map[string]int64, error)
+	RecipeCountsByCategory(ctx context.Context) (map[string]int64, error)
 	RepointRecipeReferences(ctx context.Context, oldRootID, newRootID string) error
 	HasIncomingReferences(ctx context.Context, recipeID string) (bool, error)
 	GetRecipeTitles(ctx context.Context, ids []string) (map[string]string, error)
