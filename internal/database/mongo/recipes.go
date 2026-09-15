@@ -241,6 +241,8 @@ func buildRecipeFilterPipeline(parameters models.GetRecipesRequest) []bson.D {
 		}
 	}
 
+	isFamilyListing := parameters.VariationOf == "" && !parameters.OwnRecipes
+
 	switch {
 	case parameters.VariationOf != "":
 		// List only the variations of the given recipe id, never the root.
@@ -270,10 +272,20 @@ func buildRecipeFilterPipeline(parameters models.GetRecipesRequest) []bson.D {
 	// only a variation's text matches (decision #3) - never applied to the
 	// variation_of/own_recipes listings above, which aren't being viewed as
 	// "families" in that sense.
-	includeVariationsMatch := parameters.VariationOf == "" && !parameters.OwnRecipes &&
+	includeVariationsMatch := isFamilyListing &&
 		(parameters.Title != "" || len(parameters.Ingredients) > 0)
-	if includeVariationsMatch {
+	if isFamilyListing {
+		// Also needed (beyond the search cross-match above) to compute
+		// family_sort_id below: a new variation should bump its root back to
+		// the top of the newest-first default listing, so the variation
+		// actually gets seen instead of sitting undiscoverable under
+		// whenever the root itself was created.
 		pipeline = append(pipeline, variationsLookupStage)
+		pipeline = append(pipeline, bson.D{{Key: "$addFields", Value: bson.D{
+			{Key: "family_sort_id", Value: bson.D{{Key: "$max", Value: bson.D{{Key: "$concatArrays", Value: bson.A{
+				bson.A{"$_id"}, "$variations._id",
+			}}}}}},
+		}}})
 	}
 
 	if parameters.SearchLocale != "" && (parameters.Title != "" || len(parameters.Ingredients) > 0) {
@@ -366,7 +378,7 @@ func buildRecipeFilterPipeline(parameters models.GetRecipesRequest) []bson.D {
 		}
 	}
 
-	if includeVariationsMatch {
+	if isFamilyListing {
 		pipeline = append(pipeline, bson.D{{Key: "$unset", Value: "variations"}})
 	}
 
@@ -375,10 +387,19 @@ func buildRecipeFilterPipeline(parameters models.GetRecipesRequest) []bson.D {
 
 // buildRecipeSortStages returns the sort stage(s) for parameters: either the
 // plain newest-first sort, or (when a preparation/total time target is given)
-// a sort by closeness to that target, ties broken newest-first.
+// a sort by closeness to that target, ties broken newest-first. On the
+// default family-collapsed listing, "newest" is family_sort_id (see
+// buildRecipeFilterPipeline) rather than the root's own _id, so a fresh
+// variation promotes its whole family back to the top instead of sitting
+// buried under however old the root is.
 func buildRecipeSortStages(parameters models.GetRecipesRequest) []bson.D {
+	sortKey := "_id"
+	if parameters.VariationOf == "" && !parameters.OwnRecipes {
+		sortKey = "family_sort_id"
+	}
+
 	if parameters.PreparationTime == 0 && parameters.TotalTime == 0 {
-		return []bson.D{{{Key: "$sort", Value: bson.D{{Key: "_id", Value: -1}}}}}
+		return []bson.D{{{Key: "$sort", Value: bson.D{{Key: sortKey, Value: -1}}}}}
 	}
 
 	var stages []bson.D
@@ -425,7 +446,7 @@ func buildRecipeSortStages(parameters models.GetRecipesRequest) []bson.D {
 		}},
 	}}}, bson.D{{Key: "$sort", Value: bson.D{
 		{Key: "combinedDifference", Value: 1},
-		{Key: "_id", Value: -1},
+		{Key: sortKey, Value: -1},
 	}}})
 	return stages
 }

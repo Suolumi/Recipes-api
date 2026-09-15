@@ -61,6 +61,43 @@ func TestGetRecipeDocumentsVariationFiltering(t *testing.T) {
 	assert.ElementsMatch(t, []string{root.Hex(), variation.Hex()}, gotIDs)
 }
 
+func TestGetRecipeDocumentsDefaultListingPromotesFamilyOnNewVariation(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	author := insertTestUser(t, db, ctx, "promote-author")
+	older := insertRecipeDoc(t, db, ctx, bson.M{
+		"author": author, "title": "Older Root",
+		"ingredients": bson.A{bson.M{"name": "flour"}}, "kind": "dish",
+	})
+	newer := insertRecipeDoc(t, db, ctx, bson.M{
+		"author": author, "title": "Newer Root",
+		"ingredients": bson.A{bson.M{"name": "flour"}}, "kind": "dish",
+	})
+
+	// Before any variation exists, plain newest-first _id ordering applies.
+	list, _, err := db.GetRecipeDocuments(models.GetRecipesRequest{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, list, 2)
+	assert.Equal(t, newer.Hex(), list[0].Id.Hex())
+	assert.Equal(t, older.Hex(), list[1].Id.Hex())
+
+	// A variation on the older root should promote it back to the top of the
+	// default listing - the root is still what's shown, but the family's
+	// most recent activity, not the root's own creation date, decides its
+	// position.
+	insertRecipeDoc(t, db, ctx, bson.M{
+		"author": author, "title": "Older Root V2", "variation_of": older,
+		"ingredients": bson.A{bson.M{"name": "flour"}}, "kind": "dish",
+	})
+
+	list, _, err = db.GetRecipeDocuments(models.GetRecipesRequest{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, list, 2)
+	assert.Equal(t, older.Hex(), list[0].Id.Hex())
+	assert.Equal(t, newer.Hex(), list[1].Id.Hex())
+}
+
 func TestGetRecipeDocumentsCategoryFiltering(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
